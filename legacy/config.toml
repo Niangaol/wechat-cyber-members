@@ -1,0 +1,36 @@
+# ============================================================
+# 微信机器人配置（年糕专用）
+# 改完保存即可，下次运行生效
+# ============================================================
+
+[wechat]
+distro = "Ubuntu-24.04"        # WSL 发行版名（wsl -l -v 里看到的）
+window_class = "WeChatAppEx"   # 窗口 class，用来在 X 窗口树找微信
+window_title = "Weixin"        # 窗口标题关键字
+data_dir = "~/.xwechat"        # 微信数据目录（登录态在这，勿删）
+
+[screen]
+tool = "import"                # 截图工具：import（ImageMagick，已验证可用）
+save_dir = "/tmp/wechat-bot"   # 截图保存目录
+poll_interval = 3.0            # 消息监测轮询间隔（秒）
+
+[executor]
+# 操作执行器：xdotool（默认）/ custom（你的工具，见 src/executor.py）
+type = "xdotool"
+
+[llm]
+# 聊天大脑。echo = 复读机（先跑通链路用）；deepseek / ollama 后期配
+# 接口已留好，见 src/llm.py
+backend = "echo"
+api_base = "https://api.deepseek.com"
+api_key = ""                   #  backend = deepseek 时填这里
+model = "deepseek-chat"
+ollama_base = "http://127.0.0.1:11434"
+ollama_model = "qwen2.5:7b"
+
+[bot]
+echo_mode = true               # echo 模式：收到什么回什么（验证链路用）
+reply_prefix = ""              # 回复前缀，不想加就留空
+max_reply_chars = 500          # 单次回复最长字数（防模型抽风）
+chat_enabled = true            # 聊天回复开关
+moment_enabled = false         # 发朋友圈开关（定时任务）

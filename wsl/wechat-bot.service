@@ -1,0 +1,17 @@
+[Unit]
+Description=WeChat resident bot (WSL, single whitelisted chat)
+After=graphical-session.target
+# 必须放 [Unit] 段：放 [Service] 段会被 systemd 忽略（实测日志里就有 unknown key）
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/d/AgentPrograms/wechat-bot
+ExecStart=/usr/bin/python3 /mnt/d/AgentPrograms/wechat-bot/src/resident.py
+Restart=on-failure
+RestartSec=10
+# 环境变量在运行时目录，不写进项目
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

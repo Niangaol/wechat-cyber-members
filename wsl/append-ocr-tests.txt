@@ -1,0 +1,21 @@
+    def test_batch_forced_past_heuristic_when_local_looks_confident(self):
+        # 回归：本地读出含 CJK 的乱码（让 6 引号那种）会骗过 needs_model_ocr 的
+        # 零 CJK 才触发判据，被判成可靠读数 -> 模型不被调用、错字原样入队。
+        # force=True 表示调用方已确认值得花这一次，必须真的调用。
+        ui = FakeUI(['让 6"'] * 4)
+        model = unittest.mock.Mock()
+        model.ocr_bubbles_image.return_value = {0: '你 tm 是谁？'}
+        out = ocr_bubbles(ui, bubble(), [(0, 0, 200, 80)], model=model,
+                          aliases=self.ALIASES, force=True)
+        model.ocr_bubbles_image.assert_called_once()
+        self.assertEqual(out, ['你 tm 是谁？'])
+    def test_batch_not_forced_by_default(self):
+        # 不传 force 时保持原语义：本地都读得好就一次都不调模型
+        ui = FakeUI(['神了'] * 4)
+        model = unittest.mock.Mock()
+        ocr_bubbles(ui, bubble(), [(0, 0, 200, 80)], model=model, aliases=self.ALIASES)
+        model.ocr_bubbles_image.assert_not_called()
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -1,0 +1,79 @@
+{
+  "moments_icon": [
+    33,
+    251
+  ],
+  "camera_icon": [
+    77,
+    22
+  ],
+  "file_path_input": [
+    639,
+    586
+  ],
+  "file_open_button": [
+    912,
+    586
+  ],
+  "text_input": [
+    285,
+    140
+  ],
+  "publish_button": [
+    222,
+    552
+  ],
+  "_notes": {
+    "moments_icon": "主窗口侧边栏光圈图标（点击可复现切换朋友圈面板，已实测）",
+    "camera_icon": "Moments 独立窗口顶栏第 2 个图标（点击弹出文件框，已实测）",
+    "file_path_input": "Qt 文件对话框 File name 行（--window 直送键入成功，已实测）",
+    "file_open_button": "文件对话框 Open 按钮（UI-TARS 点击命中，编辑页已弹出，已实测）",
+    "text_input": "编辑页 Say something 行（卡片顶部，未实测）",
+    "publish_button": "编辑页绿色 Post 按钮实测中心 (222,552)：绿色矩形 x=165..280 y=537..567（2026-10-16 用像素扫描量出）。旧值 (220,531) 在按钮上边缘之外 6px，点了等于没点——这就是 23:25 那次假成功的原因。",
+    "moments_window": {
+      "title": "Moments",
+      "size": [
+        573,
+        573
+      ],
+      "origin": [
+        353,
+        114
+      ]
+    },
+    "calibrated_at": "2026-10-16T17:52"
+  },
+  "interact_ui": {
+    "_note": "朋友圈互动（赞/评）坐标，2026-10-16 实测标定。均为 Moments 窗口相对坐标，发布器按窗口实时原点换算成屏幕绝对坐标。moment_more 不设固定点——··· 按钮用像素扫描定位（见 moments_publisher.find_more_buttons）。",
+    "comment_input": [
+      250,
+      480
+    ],
+    "comment_send": [
+      467,
+      501
+    ],
+    "more_button_x": 530,
+    "more_scan_x1": 515,
+    "more_scan_x2": 547,
+    "menu_like_offset": [
+      68,
+      17
+    ],
+    "menu_comment_offset": [
+      205,
+      18
+    ],
+    "menu_size": [
+      274,
+      38
+    ],
+    "calibrated_at": "2026-10-16T20:05",
+    "verified": [
+      "more_button 像素扫描在真实信息流截图命中 (530,552)，按钮实体 247灰底+双点",
+      "menu 弹窗为独立 X 窗口 274x38，Like 在左半 (68,17)、Comment 在右半 (205,18)（相对菜单原点）",
+      "comment 输入框点击 (250,480) 实测可收键；Send (467,501) 空输入灰色禁用、有内容绿色启用",
+      "Escape 可无痕退出评论框（已实测：未输入未发送）"
+    ]
+  }
+}

@@ -1,0 +1,58 @@
+
+    def test_fresh_message_forces_model_ocr(self):
+        """回归：本地 OCR 读出含 CJK 的乱码（如'让 6"'）时，needs_model_ocr 启发式
+        会认为"读得可靠"而不调模型，错字就原样入队、回复跟着跑偏。
+        有新消息必须强制走一次批量模型 OCR（模型调用次数=新消息批次数）。"""
+        cfg = dict(BASE_CFG, group_whitelist=['G'])
+        r = make_resident(cfg)
+        self.addCleanup(stop_patches, r)
+        self.addCleanup(r.db.close)
+        class UI:
+            def __init__(self):
+                self.image = frame()
+            def capture(self):
+                return self.image
+            def chat_image(self, im):
+                return im.crop((283, 72, 1021, 584))
+        ui = UI()
+        seen = []
+        def fake_ocr(u, img, bboxes, model=None, aliases=(), force=False):
+            seen.append(force)
+            # 含 CJK 的乱码：能骗过"零 CJK 才触发"的启发式
+            return ['让 6"'] * len(bboxes)
+        with patch('visual_parse.ocr_bubbles', side_effect=fake_ocr):
+            self.assertFalse(r.observe_one(cfg, ui, None, 'G', ui.image))
+            self.assertEqual(seen, [])          # 只建基线：零额度
+            ui.image = frame(media=True)
+            self.assertTrue(r.observe_one(cfg, ui, None, 'G', ui.image))
+            self.assertEqual(seen, [True])      # 有新消息：强制一次批量模型 OCR
+
+    def test_monitoring_without_fresh_message_costs_no_model(self):
+        """轮询/指纹对比/建基线全程零模型调用（用户明确要求）。"""
+        cfg = dict(BASE_CFG, group_whitelist=['G'])
+        r = make_resident(cfg)
+        self.addCleanup(stop_patches, r)
+        self.addCleanup(r.db.close)
+        class UI:
+            def __init__(self):
+                self.image = frame()
+            def capture(self):
+                return self.image
+            def chat_image(self, im):
+                return im.crop((283, 72, 1021, 584))
+        ui = UI()
+        seen = []
+        def fake_ocr(u, img, bboxes, model=None, aliases=(), force=False):
+            seen.append(force)
+            return ['hello'] * len(bboxes)
+        model = unittest.mock.Mock()
+        model.key.return_value = 'k'
+        with patch('visual_parse.ocr_bubbles', side_effect=fake_ocr):
+            self.assertFalse(r.observe_one(cfg, ui, model, 'G', ui.image))
+            self.assertFalse(r.observe_one(cfg, ui, model, 'G', ui.image))
+            self.assertEqual(seen, [])
+            self.assertEqual(r.quota.depth(), 0)
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)

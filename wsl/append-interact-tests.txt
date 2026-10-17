@@ -1,0 +1,63 @@
+
+class WhitelistTests(unittest.TestCase):
+    """whitelist_only 真生效：没名单 fail-closed 不花额度；有名单只放行名单内作者。"""
+
+    def setUp(self):
+        self.inbox = MomentInbox(sqlite3.connect(':memory:'))
+        for i, author in enumerate([' Alice', 'Bob', '很帅的年糕']):
+            self.inbox.add(author, '动态内容%d' % i, False, 'fp%d' % i)
+
+    def test_no_friends_list_blocks_without_model_call(self):
+        """whitelist_only=true 但没配 friends：直接跳过，零模型调用。"""
+        model = FakeModel([])
+        pipe = InteractionPipeline(model, {'whitelist_only': True})
+        stats = pipe.run_batch(self.inbox)
+        self.assertEqual(stats.get('skipped'), 'whitelist_only_no_friends')
+        self.assertEqual(stats['collected'], 3)
+        self.assertEqual(model.calls, 0)          # 没花额度
+        self.assertEqual(self.inbox.pending_count(), 3)   # 状态不变，下次可重试
+
+    def test_whitelist_off_ignores_missing_list(self):
+        """whitelist_only=false（或缺省）：没有 friends 也正常跑。"""
+        model = FakeModel([
+            json.dumps([{'id': 1, 'interact': True, 'reason': '有趣'},
+                        {'id': 2, 'interact': False, 'reason': ''},
+                        {'id': 3, 'interact': True, 'reason': '接梗'}], ensure_ascii=False),
+            json.dumps([{'id': 1, 'comment': '哈哈哈'}], ensure_ascii=False),
+        ])
+        pipe = InteractionPipeline(model, {'whitelist_only': False})
+        stats = pipe.run_batch(self.inbox)
+        self.assertEqual(stats['selected'], 2)
+        self.assertEqual(model.calls, 2)
+
+    def test_items_carry_in_whitelist_flag(self):
+        """决策官收到的条目带 in_whitelist 标记；系统提示词含白名单硬约束。"""
+        captured = {}
+        class SpyModel:
+            def call(self, messages, max_tokens=1800):
+                captured['system'] = messages[0]['content']
+                captured['items'] = json.loads(messages[-1]['content'])
+                return json.dumps([{'id': i, 'interact': False, 'reason': ''}
+                                   for i in (1, 2, 3)], ensure_ascii=False)
+        pipe = InteractionPipeline(SpyModel(), {'whitelist_only': True,
+                                                'friends': ['Alice', '很帅的年糕']})
+        pipe.run_batch(self.inbox)
+        flags = {it['author'].strip(): it['in_whitelist'] for it in captured['items']}
+        self.assertTrue(flags['Alice'])
+        self.assertTrue(flags['很帅的年糕'])
+        self.assertFalse(flags['Bob'])
+        self.assertIn('白名单模式', captured['system'])
+
+    def test_whitelist_off_has_no_constraint_in_prompt(self):
+        captured = {}
+        class SpyModel:
+            def call(self, messages, max_tokens=1800):
+                captured['system'] = messages[0]['content']
+                return json.dumps([{'id': i, 'interact': False, 'reason': ''}
+                                   for i in (1, 2, 3)], ensure_ascii=False)
+        InteractionPipeline(SpyModel(), {}).run_batch(self.inbox)
+        self.assertNotIn('白名单模式', captured['system'])
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)

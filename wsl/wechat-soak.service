@@ -1,0 +1,22 @@
+[Unit]
+Description=WeChat bot soak monitor (continuous health sampling)
+After=wechat-bot.service
+StartLimitIntervalSec=0
+# 故意不写 PartOf：机器人重启时烤机要继续跑，才能把那次重启如实记下来
+# （跟着一起重启的话，正好会错过它要观测的那个事件）
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/d/AgentPrograms/wechat-bot
+# 正式上线后是持续监测：DURATION=0 表示不停；按天切文件、只留 14 天
+Environment=SOAK_TAG=resident
+Environment=SOAK_DURATION=0
+Environment=SOAK_INTERVAL=30
+Environment=SOAK_KEEP_DAYS=14
+Environment=DISPLAY=:99
+ExecStart=/usr/bin/python3 wsl/soak.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

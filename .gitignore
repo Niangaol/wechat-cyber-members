@@ -1,0 +1,35 @@
+# ---- 运行状态与缓存（不入库）----
+.local/
+__pycache__/
+*.pyc
+logs/
+*.log
+
+# ---- 截图 / 大图（调试产物，不入库）----
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.html
+shots/
+
+# 例外：跑起来必需的模板与配置素材（很小，必须跟着仓库走）
+!config/target-title.png
+!config/chat-anchors/*.png
+!config/assets/*.png
+
+# ---- 凭据（绝不入库）----
+credentials*.json
+credentials*.json.*
+.env
+.env.*
+*secrets*.json
+*_key.txt
+
+# ---- 意外产物 ----
+%SystemDrive%/
+*.db
+
+# ---- 微信客户端目录（如果以后链进来）----
+xwechat_files/

@@ -1,0 +1,18 @@
+{
+  "state": "new_message_enqueued",
+  "queue_depth": 1,
+  "priority": 2,
+  "kinds": [
+    "image",
+    "text"
+  ],
+  "text_chars": [
+    5,
+    13
+  ],
+  "timeline_rows": 2,
+  "other_chat_rows": 0,
+  "observation_seconds": 3.247,
+  "model_calls": 0,
+  "sent_messages": 0
+}

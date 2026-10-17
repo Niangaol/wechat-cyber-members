@@ -1,0 +1,186 @@
+{
+  "_notes_配置诚实性": {
+    "说明": "2026-10-17 审计：下面这些键代码里没有读取，只是说明文字或未实现能力的占位；真正的开关写在每条的右边。配置撒谎过一次（max_replies_per_hour 没人读），所以把话说清楚。",
+    "group_policy": "群策略实际由 group_whitelist 强制：只有名单里的群会被监听",
+    "automation.allow_images": "回复挂几张图由 reply_image_limit 决定（0 = 不挂）",
+    "automation.allow_stickers": "表情包任何代码路径都不会发（send_sticker 没有调用方）",
+    "image_generation.provider": "生图走 src/imagegen.py 内部设置，不看这里",
+    "interact.batch_size": "互动目前是全量 pending；频率由 InteractGuard 卡（白名单/间隔/每日上限）",
+    "interact.auto_execute": "互动只走到「入库等确认」，执行侧尚未实现；interact.enabled=false 也拦着",
+    "privacy.save_raw_screenshots": "常驻进程只在内存里持有截图、从不落盘（落盘只发生在调试脚本）",
+    "privacy.history_turns": "会话上下文长度写在 memory.context_for() 里，此处不生效"
+  },
+  "direct_policy": "blacklist",
+  "direct_blacklist": [],
+  "direct_whitelist": [
+    "很帅的年糕",
+    "Deepseek"
+  ],
+  "group_policy": "whitelist",
+  "group_whitelist": [
+    "Agent 聊天测试群",
+    "人机",
+    "Vibe AI Lab 招新交流群"
+  ],
+  "target_chat": "很帅的年糕",
+  "watch_chats": [
+    "Agent 聊天测试群",
+    "人机",
+    "Vibe AI Lab 招新交流群"
+  ],
+  "_groups_说明": "正式群的接话策略：@ 必处理；普通消息按 plain_mode 走本地筛选（不调模型、不花额度）。测试群保持 all（历史行为不变），未登记的群按最保守的 at_only。",
+  "groups": {
+    "人机": {
+      "plain_mode": "idle",
+      "plain_cooldown_s": 120,
+      "plain_per_hour": 6,
+      "followup_window_s": 60,
+      "_说明": "idle = @ 必回 + 喊名字/追问必接 + 空闲时闲聊也接一句（队列空 + 120 秒冷却 + 6 次/小时）。嫌吵就把 plain_mode 改回 selective（只接喊名字和追问）。"
+    },
+    "Agent 聊天测试群": {
+      "plain_mode": "all"
+    },
+    "Vibe AI Lab 招新交流群": {
+      "plain_mode": "selective",
+      "plain_cooldown_s": 180,
+      "plain_per_hour": 4,
+      "followup_window_s": 60,
+      "_说明": "214 人的招新大群，默认走 selective：只有 @ 它 / 喊名字 / 刚回过话 60 秒内的追问才接，普通闲聊只当上下文（不花模型额度回话）。想让它也闲聊：plain_mode 改 idle。"
+    }
+  },
+  "chat_types": {
+    "Agent 聊天测试群": "group",
+    "很帅的年糕": "direct",
+    "人机": "group",
+    "Vibe AI Lab 招新交流群": "group"
+  },
+  "concurrency": {
+    "max_watch_chats": 5,
+    "max_sends_per_cycle": 2,
+    "queue_yield_after": 3
+  },
+  "limits": {
+    "window_5h": 6000,
+    "window_1d": 70000
+  },
+  "bot_name": "年糕 Agent",
+  "mention_aliases": [
+    "年糕Agent",
+    "年糕"
+  ],
+  "display": ":99",
+  "poll_seconds": 1,
+  "ui_backoff_seconds": 30,
+  "debounce_seconds": 0.6,
+  "observe_full_sweep_seconds": 600,
+  "observe_sweep_batch": 2,
+  "observe_visit_cooldown_s": 5,
+  "hot_refresh_seconds": 300,
+  "reply_image_limit": 2,
+  "max_send_retries": 2,
+  "retry_backoff_seconds": 5,
+  "maintain_seconds": 21600,
+  "media_keep_days": 14,
+  "max_replies_per_hour": 30,
+  "min_reply_seconds": 3,
+  "reply_max_chars": 200,
+  "expected_width": 1021,
+  "expected_height": 740,
+  "window_origin": [
+    0,
+    0
+  ],
+  "step_plan": {
+    "base_url": "https://api.stepfun.com/step_plan/v1",
+    "model": "step-3.7-flash",
+    "api_key_env": "STEP_PLAN_API_KEY",
+    "credential_file": "credentials.json",
+    "timeout": 90,
+    "reasoning_effort": "low",
+    "ocr_model": "step-3.7-flash",
+    "_测试说明": "2026-10-17 用户明确选择 step-3.7-flash + low；不再把 none 当成已证实的无思考模式。"
+  },
+  "_model_切换说明": "model.enabled=true 才启用新 provider；false 时完全按 step_plan 跑（可随时回滚）。切换步骤：①把 OpenCode Go 密钥写进运行时凭据（命令见 OPERATIONS）②DISPLAY=:99 python3 wsl/check-model.py 实测新端点 ③model.enabled 改 true ④重启 wechat-bot。key 不写进本文件。",
+  "model": {
+    "enabled": false,
+    "provider": "opencode-go",
+    "base_url": "https://opencode.ai/zen/go/v1",
+    "model": "longcat-2.5-preview-free",
+    "api_key_env": "OPENCODE_API_KEY",
+    "credential_file": "credentials.json",
+    "credential_key": "opencode_api_key",
+    "app_user_agent": "niangao-wechat-agent/1.0",
+    "session_header": "x-opencode-session",
+    "timeout": 90,
+    "max_retries": 2,
+    "breaker_after": 3,
+    "breaker_seconds": 60,
+    "temperature": 0.1,
+    "_reasoning_说明": "2026-10-17 实测记录：LongCat 2.5 Preview Free 是推理模型，思考放 reasoning_content、正文在 content（我们只发 content）。它按用户要求用 medium；实测 effort 档位对思考长度影响很小（low/none 也照样想 180-227 字符），所以 max_tokens 必须留足，被截断会被当成失败而不是发出半句。MiMo-V2.6-Flash 贵，已换掉；两者都实测能读图（data URL）。",
+    "reasoning_effort": "medium",
+    "vision": "verified 2026-10-17 09:30 (data URL 图像描述准确；OCR 仍留 stepfun 待单独验证)",
+    "ocr": {
+      "mode": "stepfun",
+      "base_url": "https://api.stepfun.com/step_plan/v1",
+      "model": "step-3.7-flash",
+      "api_key_env": "STEP_PLAN_API_KEY",
+      "credential_file": "credentials.json",
+      "credential_key": "step_plan_api_key",
+      "timeout": 90
+    },
+    "cost_note": "LongCat 2.5 Preview Free 在 OpenCode Go 是限时免费档；免费结束需换模型或付费，配置里换 model 一行即可",
+    "_当前状态": "2026-10-17 10:36 用户决定回到 step5：MiMo 太贵、LongCat 免费但慢且限时，最终用 StepFun step-5-preview + medium 思考。model.enabled=false 时下面 step_plan 块生效，OpenCode Go 的配置留着不动，想再试改回 true 即可。"
+  },
+  "image_generation": {
+    "provider": "qianwenyun",
+    "model": "qwen-image-2.1-turbo",
+    "enabled": true,
+    "status": "verified 2026-10-17 01:39 (20.9s / 4.2MB / OC参考图生效)；目前只用于朋友圈草稿配图，allow_moments=false 时不会触发"
+  },
+  "links": {
+    "enabled": true,
+    "max_urls": 2,
+    "max_bytes": 250000,
+    "max_chars": 9000,
+    "timeout": 10,
+    "total_budget_seconds": 12
+  },
+  "interact": {
+    "enabled": false,
+    "batch_size": 8,
+    "comment_max": 60,
+    "whitelist_only": true,
+    "friends": [],
+    "auto_execute": false
+  },
+  "moments": {
+    "enabled": true,
+    "min_days": 2,
+    "max_days": 3,
+    "max_chars": 300,
+    "with_image": true,
+    "auto_publish": false
+  },
+  "image_reply": {
+    "enabled": true,
+    "keywords": ["发图", "发张图", "发个图", "来张图", "来一张", "画一张", "画张", "画个", "生成图片"],
+    "max_per_hour": 3,
+    "_说明": "用户消息里出现明确要图词 → 文字回复后生图（带 OC 参考图）并用已验证发图链路发送；每会话每小时最多 3 张。失败只记录，不影响文字回复。想关：enabled=false。"
+  },
+  "automation": {
+    "enabled": true,
+    "reply_to_existing": false,
+    "allow_images": false,
+    "allow_stickers": false,
+    "allow_moments": false
+  },
+  "privacy": {
+    "save_raw_screenshots": false,
+    "history_turns": 12
+  },
+  "stop_file": "STOP",
+  "direct_enabled": true,
+  "direct_auto_discover": true,
+  "direct_discovery_seconds": 300,
+  "_direct_说明": "2026-10-17 用户决定：私聊加回来，但**以群聊为主**。true = 监控并回复登记私信；direct_auto_discover=true 时，每60秒本地扫描新会话、在通讯录核验昵称与微信号后自动登记，无需人工补昵称。登记结果独立保存在运行状态 direct-friends.json，仍受 direct_blacklist 限制；群白名单不扩展。群聊优先是硬保证：队列优先级 群@(0) > 私信(1) > 群普通消息(2)；私信轮到自己时若队列里还有群@在等，会主动让位回队列（最多 3 次），等群里的活干完再回。想再关掉：改 false。"
+}

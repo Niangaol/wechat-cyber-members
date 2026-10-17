@@ -1,0 +1,15 @@
+[Unit]
+Description=WeChat Xvfb+noVNC+wechat resident stack
+After=graphical-session.target
+# 常驻服务不要被 systemd 的启动频率限制判死（连崩几次后它会拒绝再启动）。
+# 必须放 [Unit] 段：放 [Service] 段 systemd 只记一条 warning 然后忽略（实测踩过）。
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/mnt/d/AgentPrograms/wechat-bot/wsl/stack-main.sh
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=default.target
