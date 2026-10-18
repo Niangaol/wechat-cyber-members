@@ -104,13 +104,23 @@ MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_IMAGE_PIXELS = 16_000_000
 
 
-def prepare_png_bytes(data):
-    """把任意静态 PNG/JPEG/WebP 冻结成白底 PNG：去元数据、最长边 2048、限制大小。
+def prepare_png_bytes(data, max_px=2048):
+    """把任意静态 PNG/JPEG/WebP 冻结成白底 PNG：去元数据、最长边 max_px、限制大小。
 
     发图流程和生图链路共用这一个规范化入口，保证"发出去的字节"可复现、可核验。
+
+    max_px：最长边上限。2026-10-18 用户要求回复配图"当表情包用，小一点没关系"，
+    于是回复链路传 512（群聊里观感就是表情包，上传体积从 2.9MB 掉到几百 KB）；
+    朋友圈等需要看清细节的路径仍用默认 2048。配置写错时按默认走，不把图缩成马赛克。
     """
     import io as _io
     from PIL import Image, ImageOps
+    try:
+        max_px = int(max_px)
+    except (TypeError, ValueError):
+        max_px = 2048
+    if max_px < 64:
+        max_px = 2048
     if len(data) > MAX_IMAGE_BYTES:
         raise SafetyError('图片超过 20MB')
     with Image.open(_io.BytesIO(data)) as im:
@@ -123,7 +133,7 @@ def prepare_png_bytes(data):
         # 白底避免透明像素在微信里变黑；复制像素以丢弃 EXIF/注释等元数据。
         canvas = Image.new('RGB', frame.size, 'white')
         canvas.paste(frame, mask=frame.getchannel('A'))
-        canvas.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
+        canvas.thumbnail((max_px, max_px), Image.Resampling.LANCZOS)
         out = _io.BytesIO()
         canvas.save(out, format='PNG')
         png = out.getvalue()
@@ -273,7 +283,8 @@ class WeChatUI:
         return self.run(['xsel','--clipboard','--output'], timeout=5).decode('utf-8')
 
     def clipboard_write(self, text):
-        self.run(['xsel','--clipboard','--input'], text.encode('utf-8'), timeout=5)
+        # 与图片剪贴板共用脱离输出管道的 owner，避免后台进程占住 communicate。
+        self.clip_write('UTF8_STRING', text.encode('utf-8'))
 
     # ---------- 图片发送（与 resident 共用同一套已核验流程） ----------
     def clip_read(self):

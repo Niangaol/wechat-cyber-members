@@ -80,6 +80,10 @@ def health_ok(out):
     # 结果是"看起来健康、实际一条都不回"，只能靠人发现。
     observed, configured = out.get('observed_chats'), out.get('configured_chats')
     blind = isinstance(configured, int) and configured > 0 and observed == 0
+    # 排班停机（用户 2026-10-18 要求 8:00-22:00 上线）：到点下班是计划内的，
+    # 不是"坏了"。标记由 wsl/bot-schedule.sh 停的时候写、启动时清。
+    if out.get('scheduled_offline') and out.get('wechat-bot') != 'active':
+        return True
     return bool(out.get('wechat-bot') == 'active'
                 and out.get('wechat-stack') == 'active'
                 and isinstance(age, (int, float)) and age < 90
@@ -100,11 +104,24 @@ def main():
             out[unit] = 'error:%s' % type(exc).__name__
 
     out['stop_file'] = (STATE / 'STOP').exists()
+    # 排班停机标记：只在机器人确实没跑的时候认（有人手动拉起就当作废标记，
+    # 免得"人在群里说话、health 却说到点下班"）。
+    marker = STATE / 'scheduled-offline.json'
+    if marker.exists() and out.get('wechat-bot') != 'active':
+        try:
+            off = json.loads(marker.read_text())
+        except Exception:                          # noqa: BLE001
+            off = {}
+        out['scheduled_offline'] = True
+        out['next_start'] = off.get('resume_at')
     try:
         st = json.loads((STATE / 'status.json').read_text())
     except Exception:                              # noqa: BLE001
         st = {}
-    out['state'] = st.get('state')
+    # 排班停机时把 state 也换成 scheduled_offline：只报个布尔值不够直白，
+    # 半夜看一眼 JSON 就知道是到点下班，而不是卡在某个中间态。
+    out['state'] = ('scheduled_offline' if out.get('scheduled_offline')
+                    else st.get('state'))
     out['heartbeat_age_s'] = round(time.time() - st.get('heartbeat', 0), 1) if st else None
     out['queue_depth'] = st.get('queue_depth')
     # 模型侧状态（认证失败/熔断）：正式上线后这是"能不能回话"的关键信息

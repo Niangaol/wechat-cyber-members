@@ -127,6 +127,55 @@ class IdleModeTests(unittest.TestCase):
         self.assertFalse(allow)
         self.assertEqual(why, 'plain_busy')
 
+    def test_busy_override_is_bounded_and_keeps_cooldown(self):
+        import copy
+        cfg = copy.deepcopy(IDLE_CFG)
+        cfg['groups']['人机']['plain_allow_when_busy'] = True
+        r = self.resident_with_depth(1)
+        self.assertTrue(r.group_plain_decision('人机', msgs('天气不错'), cfg)[0])
+        r.plain_replies['人机'] = [time.time()]
+        self.assertEqual(r.group_plain_decision('人机', msgs('天气不错'), cfg),
+                         (False, 'plain_cooldown'))
+        self.assertEqual(self.resident_with_depth(2).group_plain_decision(
+            '人机', msgs('天气不错'), cfg), (False, 'plain_busy'))
+
+    def test_at_others_is_never_answered(self):
+        """用户 2026-10-18：群里 @ 别人的消息不用回——那是在跟别人说话。"""
+        for text in ['@张三 看看这个', '@Metavis 这个怎么修？', '@Vincent 太sb了']:
+            with self.subTest(text=text):
+                allow, why = self.resident_with_depth(0).group_plain_decision(
+                    '人机', msgs(text), IDLE_CFG)
+                self.assertFalse(allow)
+                self.assertEqual(why, 'plain_at_others')
+
+    def test_at_others_beats_followup_question(self):
+        """追问窗口内也不行：@ 别人的问句照样不接。"""
+        r = self.resident_with_depth(0)
+        r.last_reply_at['group:人机'] = time.time() - 5
+        allow, why = r.group_plain_decision('人机', msgs('@李四 这个怎么修？'), IDLE_CFG)
+        self.assertEqual((allow, why), (False, 'plain_at_others'))
+
+    def test_at_others_also_blocks_all_mode(self):
+        """连 plain_mode=all 也拦：这是全局规则，不是某个群的偏好。"""
+        allow, why = resident().group_plain_decision('测试群', msgs('@张三 看看'), CFG)
+        self.assertEqual((allow, why), (False, 'plain_at_others'))
+
+    def test_mentioning_the_bot_still_wins_over_at_others(self):
+        """同时 @ 机器人和别人：以被喊到为准（OCR 没认出 @ 时的兜底）。"""
+        for text in ['年糕 @张三 都看看', '@年糕Agent @张三 看看']:
+            with self.subTest(text=text):
+                allow, why = self.resident_with_depth(0).group_plain_decision(
+                    '人机', msgs(text), IDLE_CFG)
+                self.assertTrue(allow)
+                self.assertEqual(why, 'plain_called_by_name')
+
+    def test_email_is_not_a_mention(self):
+        """邮箱里的 @ 前面不是空白，不能误判成"@ 别人"把正常聊天拦掉。"""
+        allow, why = self.resident_with_depth(0).group_plain_decision(
+            '人机', msgs('联系我 niangao@example.com'), IDLE_CFG)
+        self.assertTrue(allow)
+        self.assertEqual(why, 'plain_idle')
+
     def test_idle_still_answers_when_called_even_if_busy(self):
         allow, why = self.resident_with_depth(3).group_plain_decision('人机', msgs('年糕在吗'), IDLE_CFG)
         self.assertTrue(allow)

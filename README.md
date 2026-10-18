@@ -6,6 +6,8 @@
 >
 > **配套文档**：[STATUS.md](STATUS.md)（一页速览：现在什么状态、要你拍板什么）· [VERIFICATION.md](VERIFICATION.md)（上线验收清单：每项证据 + 复现命令）· [OPERATIONS.md](OPERATIONS.md)（运维手册：体检/急停/保活/故障对照）· [RESEARCH.md](RESEARCH.md)（UI 自动化路线调研与铁律）· 旧版 README 存档于 [docs/archive/](docs/archive/)
 
+> **+ QQ 支持（NapCat + NoneBot2，实验中）**：同一台 WSL 里另起一套**独立**链路——**NapCat**（QQ NT 客户端 + OneBot 适配器，作反向 WS 客户端）→ **NoneBot2**（监听 `127.0.0.1:18080`）→ `qq/core`（复用 src/ 的记忆/额度/安全闸，独立 db 与状态目录）→ 模型。**微信链路不变**：不动 `wechat-*` 服务、不读不写 `~/.local/state/wechat-bot/`，停 QQ 不影响微信。⚠️ NapCat 属**非官方接入**（第三方协议实现），有账号风控/封号风险——只用自己的测试小号，并照 [docs/QQ.md](docs/QQ.md) 的分阶段闸门走（先 STOP、再测试私聊、最后群 @），别一上来就放开群回复。部署手册：**[docs/QQ.md](docs/QQ.md)**。
+
 ## 它能干什么
 
 | 能力 | 状态 | 说明 |
@@ -16,6 +18,8 @@
 | 分级队列 + 额度池 | ✅ | 群@(0) > 私信(1) > 群普通(2)；共用 6000/5h、70000/1d；撞限额自动排队+休息提醒 |
 | 分会话记忆 + 风格自学习 | ✅ | 按 `chat_key` 隔离档案；每 20 条触发一次学习，敏感样本剔除 |
 | RSSHub 热榜 | ✅ | 4/6 源可用，多实例故障转移，10 分钟缓存，回复时只补一个源不卡回复 |
+| 联网搜索（Tavily，agent 主动调 tool） | ✅ 实机验收 | 模型用原生 function calling 自己判断要不要查（版本/价格/推荐会查，闲聊不查），**一次回复最多查一次**；结果过安全黑名单后以 tool 消息回灌，源站点可溯源。实测：不搜 1.8s、搜 5–8.5s；免费 1000 credits/月，basic 1 credit/次 |
+| 时间感知 | ✅ 实机验收 | system 里注入日期/星期/时刻/时段/相对日期对照，并告诫"知识有截止时间、过时信息先查"；时间线每条带"多久之前"。实测：问"今天几号/现在几点"0.9s 直接答且**不浪费搜索**，深夜/午后语气也不同 |
 | 链接阅读 | ✅ | 仅公网 HTTP(S)、DNS 防重绑定、剥 script、总预算 12s |
 | 生图 | ✅ 实机验收 | 千问 qwen-image-2.1-turbo，OC 参考图人设（`config/assets/oc-reference.png`） |
 | 本地 VLM 操作（UI-TARS） | ✅ 部署 | llama.cpp CUDA + UI-TARS-1.5-7B，RTX 5070 Ti，`127.0.0.1:8088` |
@@ -94,6 +98,7 @@ wsl -d Ubuntu-24.04 -- systemctl --user start wechat-bot
 ```
 wechat-bot/
  ├─ src/                 机器人本体（25 个模块，见下方模块地图）
+ ├─ qq/                  QQ 接入（NapCat + NoneBot2）：core 平台无关实现 + bot/plugins + 示例配置
  ├─ wsl/                 运维/标定/验收脚本 + systemd 单位（acceptance/health/relogin/soak…）
  ├─ windows/             Windows 计划任务：watchdog.ps1、register-*.ps1、wsl-keepalive.vbs
  ├─ config/              resident.json（全部配置）· persona.md（人设）· moments-coords.json（实测坐标）
@@ -122,6 +127,8 @@ wechat-bot/
 | quota.py | 共用额度池 + 优先级队列 + 休息提醒 + 消息合并（防静默丢消息） | 实测 |
 | memory.py | 按 chat_key 隔离记忆 + 每 20 条风格自学习 | 单测 |
 | search.py | RSSHub 热榜缓存（多实例故障转移 + 空闲轮转） | 实测 |
+| web_search.py | 联网搜索（Tavily 默认 / 可切 DeepSeek；缓存 + 每小时上限 + 熔断 + 安全过滤） | 实测 |
+| （tool 定义） | `multimodal.WEB_SEARCH_TOOL` + 两段式 reply：第一段给工具、第二段不给（保证只调一次） | 实测 |
 | web_reader.py | 受限网页读取（公网/DNS 固定/剥 script/总预算） | 单测 |
 | multimedia.py | 气泡截图按会话隔离存放（哈希目录名） | 单测 |
 | output_safe.py | 确定性输出终闸（敏感词/变体/凭证/超长） | 单测 |

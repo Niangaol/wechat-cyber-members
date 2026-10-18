@@ -14,8 +14,12 @@ REF_IMAGE_MAX_BYTES = 2 * 1024 * 1024
 
 class ImageGenError(RuntimeError): pass
 
-def _key():
-    p = STATE/'credentials.json'
+def _key(state_dir=None, credentials_file=None):
+    # credentials_file 优先（可给绝对路径，共享微信那份 600 凭据）；否则按 state_dir 找。
+    if credentials_file:
+        p = Path(credentials_file)
+    else:
+        p = (Path(state_dir) if state_dir else STATE)/'credentials.json'
     if p.exists():
         return json.loads(p.read_text()).get('image_gen_api_key', '')
     return ''
@@ -106,18 +110,19 @@ def oc_prefix():
         return ' '.join(lines)
     except Exception:
         return ('奶白色方形年糕（右上角有咬痕），宽檐绿色探险帽配金色帽徽，'
-                '绿色大眼睛张嘴笑，两颊红晕，蓝色双肩背包插铺盖卷，黄色探险靴，挥手，'
+                '绿色大眼睛，两颊红晕，蓝色双肩背包插铺盖卷，黄色探险靴，'
                 '像素艺术风格，暖色调，治愈系，画面干净无文字')
 
 
 def generate(prompt, base='https://maas.qianwenaiapi.com', model='qwen-image-2.1-turbo',
-             ref_image=None):
+             ref_image=None, state_dir=None, credentials_file=None):
     """文生图（可带 OC 参考图）。返回本地文件路径。同步响应直接用；task_id 响应则轮询。
 
     ref_image 传入时会把图缩到 512px 内以 base64 data URL 放进 content 数组最前面；
     API 不支持图片输入时会报错，由调用方决定是否退回纯文字重试。
     """
-    key = _key()
+    key = _key(state_dir, credentials_file)
+    media_dir = (Path(state_dir) if state_dir else STATE)/'media'
     if not key:
         raise ImageGenError('生图 Key 未配置')
     if not isinstance(prompt, str) or not prompt.strip():
@@ -142,11 +147,11 @@ def generate(prompt, base='https://maas.qianwenaiapi.com', model='qwen-image-2.1
             t = _get(base.rstrip('/') + '/api/v1/tasks/' + task_id, key)
             status = (t.get('output') or {}).get('task_status')
             if status == 'SUCCEEDED':
-                return _decode(_extract(t), STATE/'media')
+                return _decode(_extract(t), media_dir)
             if status in ('FAILED', 'CANCELED', 'UNKNOWN'):
                 raise ImageGenError('生图任务状态 ' + str(status))
         raise ImageGenError('生图轮询超时')
-    return _decode(_extract(data), STATE/'media')
+    return _decode(_extract(data), media_dir)
 
 if __name__ == '__main__':
     import sys

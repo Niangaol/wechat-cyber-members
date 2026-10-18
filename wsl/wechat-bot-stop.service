@@ -1,0 +1,6 @@
+[Unit]
+Description=Stop WeChat bot at the end of the 08:00-22:00 window
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /mnt/d/AgentPrograms/wechat-bot/wsl/bot-schedule.sh stop

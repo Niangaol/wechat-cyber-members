@@ -15,9 +15,92 @@
 | 界面卡住自愈 | ✅ 会话看不成就把微信拉前台 + Esc 关浮层（120 秒最多一次），日志 `ui_recover` |
 | 分会话记忆 + 自学习 | ✅ profiles/记忆表在跑（每 20 条样本触发一次学习） |
 | RSSHub 热榜注入 | ✅ hot_items 表有数据，需要搜索的提问会带上 |
+| 联网搜索（agent 调 tool） | ✅ 实机验收（2026-10-18）：模型自己决定要不要搜，一次回复最多一次；不搜 1.8s、搜 5–8.5s |
 | 图片/表情发送 | ⛔ 未启用（`allow_images/allow_stickers=false`） |
 | 朋友圈发布 | ⛔ 代码链路已加固，但微信客户端配图上传报 `Photos not sent.`，暂停 |
 | 朋友圈点赞/评论 | ⛔ 未启用（`interact.enabled=false`） |
+
+## 联网搜索（Tavily）怎么配 / 怎么验 / 怎么关
+
+**它是什么**：联网搜索是一个**交给模型自己调用的 tool**（原生 function calling）。
+回复分两段：第一段带 `web_search` 工具，模型要么直接回话、要么只回一个 tool_call；
+真调了工具就去打 Tavily 的 `POST https://api.tavily.com/search`，把结果以 `role:tool` 消息回灌，
+**第二段请求不再带工具**——这就是"一次回复最多查一次"的硬保证。执行器自己还有第二道闸
+（`resident.search_tool`），模型一口气吐多个 tool_call 也只放行第一个。
+参数在 `config/resident.json → web_search`。
+
+**RSSHub 热榜没变**：它仍是本地缓存、免费，只在 `needs_search` 正则命中时塞进上下文，
+和工具是两回事（热榜给"最近大家在聊什么"，工具给"去网上查这个事实"）。
+
+**先说钱**（Tavily 官方文档 2026-10-18 版）：免费额度 **1000 credits/月**，
+`search_depth=basic` **1 credit/次**、`advanced` **2 credits/次**；超出后按 $0.008/credit。
+按现在的用法（缓存 10 分钟 + 每小时上限 30 + 只在时效性提问上触发），免费额度够用。
+
+**实测记录（2026-10-18）**：`国产手柄 推荐` → HTTP 200，3.16s，返回 5 条真实结果
+（京东排行榜 / B站横评 / Chiphell / YouTube），全部通过安全闸。
+
+### 第 1 步：确认 key 在 WSL 里能用
+
+Windows 用户级环境变量里已有 `TAVILY_API_KEY`，但**服务跑在 WSL 里，看不到 Windows 的环境变量**，
+要单独给 WSL 侧的运行时凭据写一份（命令里不出现 key 明文，粘贴时不回显）：
+
+```bash
+wsl.exe -d Ubuntu-24.04 -u niangao -e bash -lc 'python3 - <<PY
+import getpass, json, os
+k = getpass.getpass("粘贴 Tavily key 后回车（不回显）: ").strip()
+p = os.path.expanduser("~/.local/state/wechat-bot/credentials.json")
+d = json.load(open(p)) if os.path.exists(p) else {}
+d["tavily_api_key"] = k
+json.dump(d, open(p, "w"), ensure_ascii=False, indent=2)
+os.chmod(p, 0o600)
+print("已写入，字段:", sorted(d))
+PY'
+```
+
+### 第 2 步：实测（只打一次搜索 API，**不碰微信界面**）
+
+```bash
+wsl.exe -d Ubuntu-24.04 -u niangao -e bash -lc 'cd /mnt/d/AgentPrograms/wechat-bot && python3 wsl/check-search.py "国产手柄 推荐"'
+```
+
+会报：用的哪个 provider、端点、key 从哪来、耗时、过滤前后条数、每条标题/链接/摘要。
+- 看到 `认证失败(401)` → key 写错了
+- 看到 `HTTP 432/433` 之类 → 免费额度用完或超了付费上限，响应体会带出来
+- 看到"过滤后 0 条"但 `last_error` 为空 → 结果全被安全黑名单筛掉了（有意为之，不是 bug）
+
+### 线上怎么确认"它真的搜了"
+
+每次回复都会把这两个数写进 `~/.local/state/wechat-bot/status.json`：
+- `search_calls`：这次回复模型调了几次搜索工具（**只可能是 0 或 1**，是"最多一次"的现场证据）
+- `search_hits`：搜索结果过了安全闸、真正回灌给模型的条数
+
+逐条明细在 `ledger.sqlite` 的 `web_search_calls` 表（query / ok / items / error / provider）。
+日志里能看到 `web_search_extra_call_ignored`（模型想调第二次被拦下）。
+
+### 第 3 步：重启机器人让它生效
+
+```bash
+wsl.exe -d Ubuntu-24.04 -u niangao -e bash -lc 'systemctl --user restart wechat-bot && sleep 3 && journalctl --user -u wechat-bot -n 20 --no-pager'
+```
+
+### 怎么切 provider / 怎么调 / 怎么关
+
+- **切回 DeepSeek**：`web_search.provider` 改成 `"deepseek"`，其余不用动——
+  两个 provider 的出厂默认（端点、key 名、score 门槛）都写在代码里，各自的子块也能覆盖。
+  （DeepSeek 那把 key 实测 402 余额不足，切过去要先充值。）
+- **别切错分数门槛**：Tavily 的 `score` 是 **0~1**、DeepSeek 的 `rerank_score` 是 **0~3**。
+  两个阈值分别写在 `tavily.min_score`（默认 0.3）和 `deepseek.min_score`（默认 1.2）里，
+  **互相抄会让结果要么全丢要么全留**。
+- **关掉**：`web_search.enabled = false`（改完重启服务；热榜兜底照常）
+- **别太频繁**：`max_per_hour`（默认 30）是每小时真实请求上限；`cache_ttl`（默认 600 秒）
+  让同一句话重复问只花一次 credit
+- **连续失败自动停**：`breaker_after=3` 次失败后暂停 `breaker_seconds=600` 秒，
+  期间静默走热榜（401/402 这类问题重试也没用，但不该每条消息都白等一次网络）
+- **加 Tavily 其它参数**：`web_search.extra_body` 里的键会被原样合并进请求体，
+  例如 `{"topic": "news", "days": 3}` 或 `{"include_answer": true}`
+- **让更多提问触发搜索**：`src/search.py` 里的 `TRIGGER` 正则现在只认时效性词
+  （最新/热搜/今天/新闻…）。想让它连"多少钱 / 哪个好 / 推荐"也去查，把词加进那条正则
+  （改的是触发条件，**会让搜索次数明显变多**）
 
 ## 朋友圈发布：选项 A 操作手册（等你说"走 A"）
 
@@ -268,3 +351,54 @@ wsl.exe -d Ubuntu-24.04 -u niangao -e bash -lc 'cd /mnt/d/AgentPrograms/wechat-b
 | 只回一个群 | 另一个会话标题核验失败 | 看日志 `paused_chat_switch`，重启 `wechat-stack` |
 | 回复很慢 | 模型调用慢（看 `reply_timing model=`） | 属正常波动；检测延迟看 `cycle_timing observe=` |
 | 服务反复重启 | WSL 被关 | 看 `logs/watchdog.log`，确认常驻客户端在 |
+
+## 上线时间排班（早上 8 点 – 晚上 10 点）
+
+2026-10-18 起，机器人**只在这个窗口内上线**：22:00 整下班、08:00 整上班。
+窗口外不观察、不回复、不发朋友圈、不互动——整个 cycle 直接跳过。
+
+### 两层保障（故意做两份，互为兜底）
+
+| 层 | 实现 | 作用 |
+| --- | --- | --- |
+| 进程内闸门 | `resident.py` 的 `online_now()` + `_cycle` 开头 | 到点就不干活；就算有人手动 `systemctl --user start wechat-bot` 也不会在窗外说话 |
+| systemd 定时器 | `wechat-bot-start.timer` / `wechat-bot-stop.timer` | 到点起停服务，夜里把 CPU/内存还回来 |
+
+`wechat-bot.service` 已 **disable**（开机不再自启），起停完全交给定时器；
+`wechat-stack`（虚拟屏 + 微信 + VNC）保持常驻，**不动它**——停掉微信可能要重新扫码。
+
+### 改作息（只改两个数，两边同步）
+
+```bash
+# ① 定时器那边
+vi /mnt/d/AgentPrograms/wechat-bot/wsl/bot-schedule.sh   # 改 START_HOUR / STOP_HOUR
+
+# ② 进程内闸门那边（config/resident.json 的 online_window.start_hour / stop_hour）
+
+# ③ 生效
+cp /mnt/d/AgentPrograms/wechat-bot/wsl/wechat-bot-{start,stop}.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user restart wechat-bot-start.timer wechat-bot-stop.timer
+```
+
+> 两边必须是同一套时间。定时器负责"省资源"，进程内闸门负责"绝不窗外说话"，
+> 改了一个忘了另一个会出现"服务在跑但一整晚不说话"的怪状态。
+
+### 到点下班长什么样（不是坏了）
+
+```bash
+DISPLAY=:99 python3 wsl/health.py
+# wechat-bot: inactive、scheduled_offline: true、next_start: 明天 08:00、ok: true
+```
+
+停机时 `bot-schedule.sh` 会写 `~/.local/state/wechat-bot/scheduled-offline.json` 作标记，
+health.py 看到它就报"到点下班"而不是 `ok:false`——免得半夜误判成机器人挂了。
+窗口内启动时标记自动清除。
+
+### 手动插队（临时让它说两句 / 立刻下班）
+
+```bash
+systemctl --user start wechat-bot     # 窗外也能拉起来，但进程内闸门照样不让它说话
+systemctl --user stop wechat-bot      # 立刻下班（记得之后 start 回来）
+```
+

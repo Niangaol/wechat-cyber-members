@@ -1,0 +1,32 @@
+[Unit]
+Description=QQ 机器人（NapCat 反向 WS → NoneBot2 → qq/core，与微信链路完全独立）
+Documentation=file:///mnt/d/AgentPrograms/wechat-bot/docs/QQ.md
+Wants=network-online.target
+After=network-online.target
+# 常驻服务不要被 systemd 的启动频率限制判死（连崩几次后它会拒绝再启动）。
+# 必须放 [Unit] 段：放 [Service] 段 systemd 只记一条 warning 然后忽略（微信那边实测踩过）。
+StartLimitIntervalSec=0
+# 刻意【不写】PartOf / BindsTo / Requires / Wants=wechat-*：
+# QQ 服务和微信服务必须互不影响——停 QQ 不能碰微信，重启微信栈也不能带起或带停 QQ。
+# 本单元不需要 DISPLAY：QQ 链路走网络协议，和 :99 虚拟屏没有任何关系。
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/d/AgentPrograms/wechat-bot
+# 环境变量文件（600，不进仓库）：QQ_BOT_PORT / QQ_BOT_ONEBOT_TOKEN / QQ_BOT_CONFIG
+# 故意不加 "-" 前缀：文件缺失就直接启动失败（fail-closed），先跑 wsl/install-qq.sh 生成。
+# 注意：没跑安装脚本时 Restart=always 会每 10 秒重试一次并在 journal 里刷错误，属预期。
+EnvironmentFile=%h/.config/qq-bot/qq.env
+ExecStart=%h/.local/share/qq-bot/venv/bin/python -m qq.bot
+Restart=always
+RestartSec=10
+TimeoutStopSec=20
+# 显式清掉可能从环境继承来的 X 相关变量：QQ 服务绝不该连上微信的 :99 虚拟屏（隔离，不是洁癖）。
+UnsetEnvironment=DISPLAY WAYLAND_DISPLAY XAUTHORITY
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily 08:00 start of the WeChat bot (online window begins)
+
+[Timer]
+OnCalendar=*-*-* 08:00:00
+# 开机后补跑：8 点前关机/休眠，开机时若已过 8 点就立刻起（脚本会核对窗口）
+Persistent=true
+
+[Install]
+WantedBy=timers.target

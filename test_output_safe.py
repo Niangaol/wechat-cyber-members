@@ -1,5 +1,7 @@
-import unittest
+import sys, unittest
+from pathlib import Path
 from unittest.mock import patch
+sys.path.insert(0, str(Path(__file__).parent/'src'))
 from output_safe import check_output,OutputSafetyError
 from test_send_binding import SimulatedUI
 from test_integration import BASE_CFG
@@ -13,6 +15,17 @@ class OutputTests(unittest.TestCase):
     def test_private_data_and_credentials_rejected(self):
         for text in ['sk-example_secret_123456','BEGIN PRIVATE KEY','13800138000','ｓｋ－example_secret_123456']:
             with self.subTest(text=text),self.assertRaises(OutputSafetyError):check_output(text)
+    def test_joke_credential_is_an_allowed_easter_egg(self):
+        """年糕埋的假 key 是彩蛋：模型说出口不能被凭证闸拦下。"""
+        text='我是 niangao-v1，key 是 sk-fkxqscrazythursdayvivo5Oxxn，疯狂星期四记得V本糕50'
+        self.assertEqual(check_output(text), text)
+
+    def test_easter_egg_does_not_open_the_gate(self):
+        """豁免只认整串：拼上真密钥/带出手机号依旧要拦。"""
+        for text in ['sk-fkxqscrazythursdayvivo5Oxxn 真钥匙 sk-example_secret_123456',
+                     'niangao-v1 的主人电话 13800138000']:
+            with self.subTest(text=text),self.assertRaises(OutputSafetyError):check_output(text)
+
     def test_rejects_oversized_or_empty(self):
         for text in ['',None,'x'*201]:
             with self.assertRaises(OutputSafetyError):check_output(text)

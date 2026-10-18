@@ -1,4 +1,9 @@
-"""回复链路发图：只在用户明确要图时触发，失败不影响文字回复，有每小时上限。"""
+"""回复链路发图：触发、上限、异步生图与失败兜底。
+
+2026-10-18 起生图改为**后台线程**（约 20 秒，不需要 UI，不该堵队列），
+发送由主循环的 flush_pending_images 完成——所以"调用后立即发送"的旧断言
+全部改成了"排队 → flush → 发送"。
+"""
 import json
 import tempfile
 import unittest
@@ -6,6 +11,16 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from test_integration import BASE_CFG, make_resident, stop_patches
+
+
+class SyncThread:
+    """把后台线程换成同步执行：测试里才能确定性地断言中间状态。"""
+
+    def __init__(self, target=None, args=(), daemon=None):
+        self._target, self._args = target, args
+
+    def start(self):
+        self._target(*self._args)
 
 
 class WantsImageTests(unittest.TestCase):
@@ -44,10 +59,14 @@ class ImageReplyTests(unittest.TestCase):
 
     def test_sends_generated_image_and_records_delivery(self):
         with patch('resident.generate_image', return_value=Path(self.png.name)), \
-             patch('resident.prepare_png_bytes', return_value=(b'png-bytes', 8, 8)):
+             patch('resident.prepare_png_bytes', return_value=(b'png-bytes', 8, 8)), \
+             patch('resident.threading.Thread', SyncThread):
             ok = self.r.maybe_send_image_reply(self.conf(), self.ui, '测试群', 'group:测试群',
                                                [{'text': '发张图看看'}])
-        self.assertTrue(ok)
+        self.assertTrue(ok)                              # 排队生图成功
+        self.ui.send_image_png.assert_not_called()       # 异步：此时还没碰 UI
+        self.r.nav = Mock()                              # flush 只需要 switch_to
+        self.assertEqual(self.r.flush_pending_images(self.cfg, self.ui), 1)
         self.ui.send_image_png.assert_called_once()
         args = self.ui.send_image_png.call_args
         self.assertEqual(args.args[0], b'png-bytes')
@@ -56,13 +75,18 @@ class ImageReplyTests(unittest.TestCase):
         self.assertEqual(row[0], 'IMAGE_SUBMITTED')
 
     def test_failure_is_swallowed_and_reported(self):
-        with patch('resident.generate_image', side_effect=RuntimeError('no key')):
+        """生图失败：任务标 failed，绝不碰 UI；文字回复早就不受影响。"""
+        with patch('resident.generate_image', side_effect=RuntimeError('no key')), \
+             patch('resident.threading.Thread', SyncThread):
             ok = self.r.maybe_send_image_reply(self.conf(), self.ui, '测试群', 'group:测试群',
                                                [{'text': '画一张'}])
-        self.assertFalse(ok)
+        self.assertTrue(ok)                              # 排队成功 ≠ 图一定生成成功
+        self.r.nav = Mock()                              # flush 用例里不需要真导航
         self.ui.send_image_png.assert_not_called()
-        status = json.loads((Path(self.r._tmp) / 'status.json').read_text())
-        self.assertEqual(status['state'], 'image_reply_failed')
+        job = self.r._image_jobs()[0]
+        self.assertEqual(job['state'], 'failed')
+        self.assertEqual(self.r.flush_pending_images(self.cfg, self.ui), 0)
+        self.ui.send_image_png.assert_not_called()
 
     def test_hourly_cap(self):
         self.r.image_sent = {'group:测试群': [__import__('time').time()] * 3}

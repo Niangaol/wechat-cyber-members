@@ -18,44 +18,29 @@
   ],
   "group_policy": "whitelist",
   "group_whitelist": [
-    "Agent 聊天测试群",
-    "人机",
-    "Vibe AI Lab 招新交流群"
+    "2026 Vibe Ai Lab"
   ],
   "target_chat": "很帅的年糕",
   "watch_chats": [
-    "Agent 聊天测试群",
-    "人机",
-    "Vibe AI Lab 招新交流群"
+    "2026 Vibe Ai Lab"
   ],
-  "_groups_说明": "正式群的接话策略：@ 必处理；普通消息按 plain_mode 走本地筛选（不调模型、不花额度）。测试群保持 all（历史行为不变），未登记的群按最保守的 at_only。",
+  "_groups_说明": "2026-10-18 用户要求：以后只做「2026 Vibe Ai Lab」这一个群。@ 必处理；普通消息按 plain_mode 走本地筛选（不调模型、不花额度）；未登记的群按最保守的 at_only（现在名单里只有一个，等于别的群一律不回）。",
+  "_groups_2026-10-18": "旧群「Vibe AI Lab 招新交流群」的账号已被移出（界面提示 Unable to send message in an exited group chat），招新群整体搬到新群「2026 Vibe Ai Lab」，频率策略原样搬过去。",
   "groups": {
-    "人机": {
+    "2026 Vibe Ai Lab": {
       "plain_mode": "idle",
-      "plain_cooldown_s": 120,
-      "plain_per_hour": 6,
+      "plain_cooldown_s": 20,
+      "plain_per_hour": 150,
+      "plain_allow_when_busy": true,
       "followup_window_s": 60,
-      "_说明": "idle = @ 必回 + 喊名字/追问必接 + 空闲时闲聊也接一句（队列空 + 120 秒冷却 + 6 次/小时）。嫌吵就把 plain_mode 改回 selective（只接喊名字和追问）。"
-    },
-    "Agent 聊天测试群": {
-      "plain_mode": "all"
-    },
-    "Vibe AI Lab 招新交流群": {
-      "plain_mode": "selective",
-      "plain_cooldown_s": 180,
-      "plain_per_hour": 4,
-      "followup_window_s": 60,
-      "_说明": "214 人的招新大群，默认走 selective：只有 @ 它 / 喊名字 / 刚回过话 60 秒内的追问才接，普通闲聊只当上下文（不花模型额度回话）。想让它也闲聊：plain_mode 改 idle。"
+      "_说明": "2026-10-18 频率回调：用户说'现在只有一个群了可以放松一点'。冷却 8→20 秒（最多约3条/分钟）、每小时 450→150；之前提频是因为多个群在抢，现在没竞争了。plain_allow_when_busy 保留 true——它不提高频率（真闸门是冷却），只是避免重试条目占住队列导致突然不说话。@ 优先级不变。另外：群里 @ 别人的消息一律不回（group_plain_decision 的 plain_at_others 全局闸门）。"
     }
   },
   "chat_types": {
-    "Agent 聊天测试群": "group",
-    "很帅的年糕": "direct",
-    "人机": "group",
-    "Vibe AI Lab 招新交流群": "group"
+    "2026 Vibe Ai Lab": "group"
   },
   "concurrency": {
-    "max_watch_chats": 5,
+    "max_watch_chats": 1,
     "max_sends_per_cycle": 2,
     "queue_yield_after": 3
   },
@@ -81,7 +66,7 @@
   "retry_backoff_seconds": 5,
   "maintain_seconds": 21600,
   "media_keep_days": 14,
-  "max_replies_per_hour": 30,
+  "max_replies_per_hour": 200,
   "min_reply_seconds": 3,
   "reply_max_chars": 200,
   "expected_width": 1021,
@@ -145,6 +130,31 @@
     "timeout": 10,
     "total_budget_seconds": 12
   },
+  "web_search": {
+    "enabled": true,
+    "provider": "tavily",
+    "credential_file": "credentials.json",
+    "timeout": 8,
+    "cache_ttl": 600,
+    "max_per_hour": 30,
+    "max_items": 5,
+    "max_summary_chars": 500,
+    "fetch_top1": false,
+    "breaker_after": 3,
+    "breaker_seconds": 600,
+    "tavily": {
+      "count": 5,
+      "search_depth": "basic",
+      "min_score": 0.3
+    },
+    "deepseek": {
+      "count": 5,
+      "need_content": false,
+      "min_score": 1.2
+    },
+    "_说明": "消息命中 needs_search（最新/热搜/最近/新闻…）时才联网查，查不到就静默降级回 RSSHub 热榜，不影响回复。当前用 tavily（2026-10-18 用户指定）：POST https://api.tavily.com/search，Bearer 鉴权，认 TVAILY_API_KEY / credentials.json 的 tavily_api_key；basic 1 credit/次、advanced 2 credits/次，免费额度 1000 credits/月。想切回 DeepSeek：把 provider 改成 \"deepseek\"（它认 deepseek_api_key，但实测账号 402 余额不足）。两边 min_score 量纲不同（Tavily 0~1，DeepSeek 0~3），切换时由各自的子块自动带上，别手工互相抄。key 不写本文件。",
+    "_参数说明": "search_depth=basic|advanced（越深越贵）；extra_body 里可以塞 Tavily 的其它参数（topic/days/include_answer 等），会被原样合并进请求体。"
+  },
   "interact": {
     "enabled": false,
     "batch_size": 8,
@@ -163,9 +173,17 @@
   },
   "image_reply": {
     "enabled": true,
+    "every_n": 3,
     "keywords": ["发图", "发张图", "发个图", "来张图", "来一张", "画一张", "画张", "画个", "生成图片"],
-    "max_per_hour": 3,
-    "_说明": "用户消息里出现明确要图词 → 文字回复后生图（带 OC 参考图）并用已验证发图链路发送；每会话每小时最多 3 张。失败只记录，不影响文字回复。想关：enabled=false。"
+    "max_per_hour": 30,
+    "max_px": 512,
+    "_说明": "2026-10-18 用户要求「说话要带图」：every_n=3 表示每 3 条回复补一张图（明确要图词则必发）。生图在后台线程跑（约 20 秒，不堵队列），发送仍由主循环做（UI 只能有一个属主）。max_per_hour=30 是每会话每小时的上限。max_px=512 是用户 2026-10-18 确认的「当表情包用，小一点没关系」：回复配图最长边压到 512，单张从 2.9MB 降到几百 KB，群里就是表情包观感；生图 API 仍按它自己的分辨率出图，我们在本地缩（所以 API 花费不随尺寸下降，降的只是体积/上传/磁盘）。想关：enabled=false。"
+  },
+  "online_window": {
+    "enabled": true,
+    "start_hour": 8,
+    "stop_hour": 22,
+    "_说明": "2026-10-18 用户要求：上线时间早上8点到晚上10点。窗口外整个 cycle 跳过（不观察/不回复/不发朋友圈/不互动），status 记 offline_window，health.py 能看出是到点下班而不是坏了。结束小时排外：22:00 整下班、08:00 整上班。改作息只改这两个数；enabled=false 恢复 24 小时在线。配置写错（非整数/区间反了）按始终在线处理并记 error 日志——不让一个笔误把机器人整天哑掉。配套还有 systemd 定时器 wechat-bot-start/stop.timer 到点起停服务（省资源），见 wsl/bot-schedule.sh。"
   },
   "automation": {
     "enabled": true,
@@ -179,7 +197,7 @@
     "history_turns": 12
   },
   "stop_file": "STOP",
-  "direct_enabled": true,
+  "direct_enabled": false,
   "direct_auto_discover": true,
   "direct_discovery_seconds": 300,
   "_direct_说明": "2026-10-17 用户决定：私聊加回来，但**以群聊为主**。true = 监控并回复登记私信；direct_auto_discover=true 时，每60秒本地扫描新会话、在通讯录核验昵称与微信号后自动登记，无需人工补昵称。登记结果独立保存在运行状态 direct-friends.json，仍受 direct_blacklist 限制；群白名单不扩展。群聊优先是硬保证：队列优先级 群@(0) > 私信(1) > 群普通消息(2)；私信轮到自己时若队列里还有群@在等，会主动让位回队列（最多 3 次），等群里的活干完再回。想再关掉：改 false。"

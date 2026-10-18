@@ -1,5 +1,5 @@
 """常驻机器人：分级入队、共用额度池、分会话记忆、排队发送。缺Key/异常时默认不发。"""
-import argparse, fcntl, hashlib, json, logging, os, re, signal, sqlite3, time
+import argparse, fcntl, hashlib, json, logging, os, re, signal, sqlite3, threading, time
 from pathlib import Path
 from urllib.parse import urlsplit
 from wechat_ui import (WeChatUI, SafetyError, UIUnavailable, normalize,
@@ -10,6 +10,7 @@ from web_reader import fetch_public_text
 from quota import (Quota, QuotaExceeded, PRIORITY_GROUP_AT, PRIORITY_DIRECT,
                    PRIORITY_GROUP_PLAIN, PRIORITY_NAMES)
 from search import HotFeed, needs_search, ROUTES as HOT_ROUTES
+from web_search import WebSearch
 from moments import MomentComposer
 from moment_release import MomentRelease, ReleaseError, load_coords
 from moments_publisher import PublisherError
@@ -92,8 +93,11 @@ def chat_key_of(cfg, title, chat_type=None):
 def gather_sources(messages, cfg):
     urls = []
     for m in messages:
-        for url in re.findall(r'https?://[^\s<>"\u3000]+', m.get('text', '')):
-            url = url.rstrip('，。；！？）)]}')
+        # URL 只吃 ASCII 字符集：老写法 [^\s<>"\u3000]+ 会把紧跟的中文一起吞掉
+        # （"看这个 https://a/b，挺好的" 会抠成 "https://a/b，挺好的"，拿去请求必然 404）。
+        for url in re.findall(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+",
+                              m.get('text', '')):
+            url = url.rstrip(".,;:!?)]}'")
             if url not in urls:
                 urls.append(url)
     results = []
@@ -536,6 +540,26 @@ class Resident:
                 return dict(value)
         return {'plain_mode': 'at_only'}
 
+    @staticmethod
+    def _at_others(text, aliases):
+        """文本里是否 @ 了别人（@ 后面跟的不是机器人别名）。
+
+        只认"行首或空白之后"的 @——邮箱（niangao@example.com）里的 @ 前面不是
+        空白，不会误判成提及。OCR 把昵称和后续文字粘在一起时用前缀匹配兜底
+        （"@年糕Agent你好" 仍算 @ 机器人）。拿不准就当没 @ 别人，不误伤。
+        """
+        norm = {normalize(a).lower() for a in aliases if normalize(a)}
+        if not norm:
+            return False
+        for m in re.finditer(r'(?:^|(?<=\s))@([^\s@]{1,16})', text or ''):
+            name = normalize(m.group(1)).lower()
+            if not name:
+                continue
+            if any(name == a or name.startswith(a) for a in norm):
+                continue
+            return True
+        return False
+
     def group_plain_decision(self, name, fresh, cfg):
         """群里的**普通消息**要不要接话：本地确定性规则，不调模型、不花额度。
 
@@ -549,15 +573,22 @@ class Resident:
         """
         policy = self.group_policy(name, cfg)
         mode = str(policy.get('plain_mode') or 'at_only')
+        text = ' '.join(str(m.get('text', '')) for m in fresh)
+        aliases = [normalize(a) for a in (cfg.get('mention_aliases') or []) if normalize(a)]
+        low = normalize(text).lower()
+        # 用户 2026-10-18：群里 @ 别人的消息不用回——那是在跟别人说话，插一句很招人烦。
+        # 放在所有模式之前：这是全局规则，不是某个群的偏好（连 plain_mode=all 也拦）。
+        # @ 到自己的消息走 at_me 优先级通道，根本到不了这里；文本里再出现别名只是
+        # OCR 没认出 @ 时的兜底，所以"提到机器人"优先于"@ 了别人"。
+        if not any(a and a.lower() in low for a in aliases) \
+                and self._at_others(text, aliases):
+            return False, 'plain_at_others'
         if mode == 'all':
             return True, 'plain_all'
         # idle（用户 2026-10-17 要求：群聊普通消息空闲时可以回一下）：
         # 保留 selective 的两条快速通道，另外在"真的空闲"时也接一句闲聊。
         if mode not in ('selective', 'idle'):
             return False, 'plain_at_only'
-        text = ' '.join(str(m.get('text', '')) for m in fresh)
-        aliases = [normalize(a) for a in (cfg.get('mention_aliases') or []) if normalize(a)]
-        low = normalize(text).lower()
         reason = None
         if any(alias and alias.lower() in low for alias in aliases):
             reason = 'plain_called_by_name'
@@ -576,7 +607,9 @@ class Resident:
             # idle 模式：闲聊也接一句，但必须"真的空闲"——队列里没有别的活在排队，
             # 免得把别人的 @ 挤到闲聊后面去。拿不准就当忙，宁可不接。
             try:
-                busy = self.quota.depth() > 0
+                # 高频群允许最多一个待处理项，仍保留积压保护与原有优先级。
+                limit = 1 if policy.get('plain_allow_when_busy') is True else 0
+                busy = self.quota.depth() > limit
             except Exception:      # noqa: BLE001 查询失败按忙处理，宁可少接一句
                 busy = True
             if busy:
@@ -805,14 +838,76 @@ class Resident:
         logging.info('observe_breakdown plan=%.1fs visits=%.1fs(%d/%d) tail=%.1fs',
                      plan_s, visits_s, len(visiting), len(names), time.time() - t_tail)
 
+    # ---------- 上线窗口（用户 2026-10-18 要求：早上 8 点到晚上 10 点） ----------
+    ONLINE_WINDOW_DEFAULTS = {'enabled': True, 'start_hour': 8, 'stop_hour': 22}
+
+    def online_now(self, cfg, hour=None):
+        """当前是否在上线窗口内。返回 (是否在窗口内, 原因)。
+
+        窗口外整个 cycle 直接跳过：不观察、不回复、不发朋友圈、不互动。
+        - 默认就是 8–22，配置整段缺失也按这个来（用户明确要的作息）
+        - enabled=false 或配置写错（非整数/区间反了）→ 按始终在线处理并记日志：
+          宁可多回一句，也不要因为一个配置笔误让机器人整天哑掉
+        - 结束小时是**排外**的：22 点整下班，8 点整上班
+        """
+        win = dict(self.ONLINE_WINDOW_DEFAULTS)
+        win.update(cfg.get('online_window') or {})
+        if win.get('enabled') is False:
+            return True, 'window_disabled'
+        try:
+            start, stop = int(win['start_hour']), int(win['stop_hour'])
+        except (TypeError, ValueError):
+            logging.error('online_window 小时数不是整数，按始终在线处理：%r', win)
+            return True, 'bad_config'
+        if not (0 <= start < stop <= 24):
+            logging.error('online_window 区间不合法（要 0<=开始<结束<=24），按始终在线处理：%r', win)
+            return True, 'bad_window'
+        now = time.localtime().tm_hour if hour is None else int(hour)
+        inside = start <= now < stop
+        return inside, ('in_window' if inside else 'outside_window')
+
     # ---------- 发图（回复链路） ----------
     IMAGE_REPLY_DEFAULTS = {
         'enabled': True,
+        'every_n': 0,        # 每 N 条回复补一张图（0=关，只认关键词）；2026-10-18 配置里=3
         'keywords': ['发图', '发张图', '发个图', '来张图', '来一张', '画一张',
                      '画张', '画个', '生成图片', '发你张图'],
         'max_per_hour': 3,
+        'max_px': 2048,      # 回复配图最长边；用户 2026-10-18 要求"当表情包"，配置里=512
     }
 
+    # 配图多样性（用户 2026-10-18：要有意义、不太一样，今天的自拍照太无趣了）：
+    # 每条配图按顺序轮换一种构图/视角，保证连续两张不一样。
+    IMAGE_VARIETY = [
+        '中景，角色正在现场做事，能看到环境细节',
+        '特写，只拍脸和手，表情夸张，像表情包',
+        '俯视，角色很小、环境占大部分，突出场面',
+        '背影或侧影，角色面向画面深处，有故事感',
+        '两格分镜，左边是之前、右边是之后',
+        '道具大特写，关键物品占画面中心，角色在旁边',
+        '角色被场景淹没（对话框/代码/食物堆成山），只露出个头',
+        '动态瞬间，角色在跑/跳/摔，带运动模糊',
+    ]
+
+    def image_prompt(self, fresh):
+        '''配图提示词：话题优先 + 构图轮换。
+
+        用户 2026-10-18 要求要有意义、不太一样。老写法是「以 OC 形象画一张图」，
+        模型就每次都交一张站立挥手的自拍照。现在改成：先把群聊话题演成一个
+        具体场景，OC 角色是场景里的演员而不是拍照模特；构图按 IMAGE_VARIETY
+        轮换，连续两张不会同个姿势。
+        '''
+        ask = ' '.join(str(m.get('text', '')) for m in fresh)[:200]
+        seq = getattr(self, '_image_variety_seq', 0)
+        self._image_variety_seq = seq + 1
+        variety = self.IMAGE_VARIETY[seq % len(self.IMAGE_VARIETY)]
+        return ('画一张跟群聊话题有关的情景梗图，不要自拍照、不要单人肖像站姿。'
+                '话题：%s。'
+                '把话题演成一个具体场景：年糕.Agent（外观：%s）身在场景里做事或做出反应，'
+                '环境、道具、动作都要和话题相关，画面要有笑点或信息量，像群聊表情包。'
+                '构图：%s。'
+                '不要文字、不要水印、不要logo，不要站立挥手这种通用姿势。'
+                % (ask, oc_prefix(), variety))[:3900]
     def image_reply_conf(self, cfg):
         conf = dict(self.IMAGE_REPLY_DEFAULTS)
         conf.update(cfg.get('image_reply') or {})
@@ -831,42 +926,111 @@ class Resident:
         self.image_sent[ck] = stamps
         return len(stamps) < max(1, int(conf.get('max_per_hour', 3) or 1))
 
-    def maybe_send_image_reply(self, cfg, ui, chat_name, ck, fresh):
-        """用户明确要图时：生图 → 与独立发图工具相同的已验证链路发送。
+    def should_attach_image(self, ck, conf, fresh):
+        """这条回复要不要补图：明确要图词必发；否则按 every_n 抽样（0=关）。"""
+        if self.wants_image(fresh, conf):
+            return True, 'asked'
+        n = int(conf.get('every_n', 0) or 0)
+        if n <= 0:
+            return False, ''
+        if not hasattr(self, 'image_counter'):
+            self.image_counter = {}
+        self.image_counter[ck] = self.image_counter.get(ck, 0) + 1
+        if self.image_counter[ck] % n == 0:
+            return True, 'sampled'
+        return False, ''
 
-        文字回复已经发出；图是附加项，任何失败只记录，不重发文字、不中断队列。
+    def maybe_send_image_reply(self, cfg, ui, chat_name, ck, fresh):
+        """决定这条回复要不要补图，并把生图丢到后台线程。
+
+        文字回复已经发出去了。生图（约 20 秒）**不需要 UI**，所以绝不能同步跑在
+        队列里——那样每张图让后面的消息白等 20 秒（用户要"说话快"，2026-10-18
+        改为后台生成）。真正需要 UI 的只有"发送"，那一步留给主循环（UI 的唯一
+        属主）在安全点做，见 flush_pending_images。
+
+        额度在这里就先占位（image_sent），避免后台还没生完、同一会话又超发。
         """
         conf = self.image_reply_conf(cfg)
-        if not conf.get('enabled') or not self.wants_image(fresh, conf):
+        if not conf.get('enabled'):
+            return False
+        want, why = self.should_attach_image(ck, conf, fresh)
+        if not want:
             return False
         if not self.image_reply_allowed(ck, conf):
             logging.info('image_reply_rate_limited chat=%s', ck)
             self.status('image_reply_rate_limited', chat=ck)
             return False
-        ask = ' '.join(str(m.get('text', '')) for m in fresh)[:200]
-        prompt = ('以年糕.Agent 的 OC 形象画一张图。OC 外观：%s。用户要求：%s'
-                  % (oc_prefix(), ask))[:3900]
+        prompt = self.image_prompt(fresh)
+        self.image_sent.setdefault(ck, []).append(time.time())   # 先占额度
+        job = {'ck': ck, 'chat': chat_name, 'prompt': prompt, 'why': why,
+               'created': time.time(), 'state': 'generating',
+               'max_px': int(conf.get('max_px', 2048) or 2048)}
+        self._image_jobs().append(job)
+        threading.Thread(target=self._generate_image_job, args=(job,), daemon=True).start()
+        self.status('image_reply_queued', chat=ck, reason=why)
+        return True
+
+    def _image_jobs(self):
+        if not hasattr(self, 'image_jobs'):
+            self.image_jobs = []
+        return self.image_jobs
+
+    def _generate_image_job(self, job):
+        """后台线程：只生图，绝不碰 UI（切会话/粘贴/回车都是全局状态）。"""
         try:
-            path = generate_image(prompt, ref_image=OC_REF)
+            path = generate_image(job['prompt'], ref_image=OC_REF)
             data = Path(path).read_bytes()
-            png, w, h = prepare_png_bytes(data)
-            self.latest_send_config(ck)          # 发送前重新核验授权
-            ui.send_image_png(png, expected_chat=chat_name,
-                              guard=lambda: self.latest_send_config(ck))
-            self.image_sent.setdefault(ck, []).append(time.time())
-            self.db.execute('INSERT INTO deliveries(created,state,digest) VALUES(?,?,?)',
-                            (time.time(), 'IMAGE_SUBMITTED',
-                             hashlib.sha256(png).hexdigest()))
-            self.db.commit()
-            logging.info('image_reply_submitted chat=%s %dx%d bytes=%d',
-                         ck, w, h, len(png))
-            self.status('image_reply_submitted', chat=ck, width=w, height=h)
-            return True
-        except Exception as e:                   # noqa: BLE001 图失败不能拖垮文字回复
-            logging.error('image_reply_failed chat=%s type=%s reason=%s',
-                          ck, type(e).__name__, str(e)[:140])
-            self.status('image_reply_failed', chat=ck, error_type=type(e).__name__)
-            return False
+            png, w, h = prepare_png_bytes(data, max_px=job.get('max_px') or 2048)
+            job.update(png=png, width=w, height=h, state='ready')
+            logging.info('image_generated chat=%s %dx%d bytes=%d',
+                         job['ck'], w, h, len(png))
+        except Exception as exc:                 # noqa: BLE001 失败只记录
+            job.update(state='failed', error=type(exc).__name__)
+            logging.error('image_generate_failed chat=%s type=%s reason=%s',
+                          job['ck'], type(exc).__name__, str(exc)[:140])
+
+    def flush_pending_images(self, cfg, ui, limit=2):
+        """把后台生成好的图发出去。**只由主循环调用**——UI 只能有一个属主。
+
+        发送前会先切回目标会话并核验标题（防发错窗），再走与同步链路相同的
+        send_image_png（它内部还会反复核验）。失败只记录，不影响别的消息。
+        """
+        ready = [j for j in self._image_jobs() if j.get('state') == 'ready']
+        if not ready:
+            return 0
+        sent = 0
+        for job in ready[:limit]:
+            ck, name = job['ck'], job['chat']
+            try:
+                self.latest_send_config(ck)              # 授权可能已被撤销
+                if not getattr(self, 'nav', None):
+                    self.nav = ChatNavigator(ui)
+                self.nav.switch_to(name)                 # 切回目标会话 + 标题核验
+                ui.send_image_png(job['png'], expected_chat=name,
+                                  guard=lambda: self.latest_send_config(ck))
+                self.db.execute('INSERT INTO deliveries(created,state,digest) VALUES(?,?,?)',
+                                (time.time(), 'IMAGE_SUBMITTED',
+                                 hashlib.sha256(job['png']).hexdigest()))
+                self.db.commit()
+                job['state'] = 'sent'
+                logging.info('image_reply_submitted chat=%s %dx%d bytes=%d',
+                             ck, job['width'], job['height'], len(job['png']))
+                self.status('image_reply_submitted', chat=ck,
+                            width=job['width'], height=job['height'], why=job.get('why'))
+                sent += 1
+            except Exception as exc:                     # noqa: BLE001
+                job.update(state='failed', error=type(exc).__name__)
+                logging.error('image_reply_failed chat=%s type=%s reason=%s',
+                              ck, type(exc).__name__, str(exc)[:140])
+                self.status('image_reply_failed', chat=ck, error_type=type(exc).__name__)
+        self._prune_image_jobs()
+        return sent
+
+    def _prune_image_jobs(self, keep=20):
+        """图在内存里（PNG 一张几百 KB～几 MB），只留最近 20 条防涨内存。"""
+        jobs = self._image_jobs()
+        if len(jobs) > keep:
+            del jobs[:len(jobs) - keep]
 
     # ---------- 发送 ----------
     def latest_send_config(self, ck):
@@ -982,9 +1146,17 @@ class Resident:
                     return True
             ctx = self.memory.context_for(ck)
             sources = gather_sources(fresh, cfg)
-            hot = self.feed.relevant(' '.join(str(m.get('text', '')) for m in fresh)) \
-                if task.get('want_search') else []
+            question = ' '.join(str(m.get('text', '')) for m in fresh)
             self.spend(model, cfg, priority, 'reply')
+            # 热榜照旧：本地缓存、免费，只在正则命中时塞进上下文。
+            hot = self.feed.relevant(question) if task.get('want_search') else []
+            # 联网搜索改成**模型自己调工具**：这里只交一个执行器进去，
+            # 查不查、查什么词由模型决定（一次回复最多查一次，见 search_tool）。
+            # 注意：搜索现在发生在 model.reply() 内部，也就是落在"生成期间画面变了没"
+            # 的比对窗口里——比原来多 1~3 秒。被判定 CHANGED 时会重排一次，
+            # 重排走缓存（cache_ttl 600s）不再花钱，所以代价是延迟不是丢失。
+            search_calls = []
+            search_fn = self.search_tool(cfg, search_calls)
             t_switch = time.time() - t_switch
             # 生成前先拍一帧，拿它和生成后的帧比较。不能用"上次观察"的旧帧：
             # 会话平静时 observe_one 会提前返回、不更新 last_frame，旧帧一对比
@@ -1000,7 +1172,8 @@ class Resident:
             except Exception:                              # noqa: BLE001
                 pass
             reply = check_output(model.reply(fresh, ctx.get('recent_turns', []), sources,
-                                             chat_context=ctx, hot_items=hot), cfg['reply_max_chars'])
+                                             chat_context=ctx, hot_items=hot,
+                                             search_fn=search_fn), cfg['reply_max_chars'])
             t_model = time.time() - t_model
             # 生成期间用户切走/来新消息/手工发了 → 放弃本次，重新观察
             self.latest_send_config(ck)
@@ -1062,7 +1235,9 @@ class Resident:
             self.baselines.pop(ck, None)
             self.last_hash.pop(ck, None)
             self.status('reply_submitted', chat=ck, priority=PRIORITY_NAMES[priority],
-                        queue_id=qid, link_reads=len(sources))
+                        queue_id=qid, link_reads=len(sources),
+                        search_calls=len(search_calls), search_hits=sum(search_calls),
+                        hot_items=len(hot))
             # 用户明确要图时，文字回复之后再生图并发送（失败只记录，不回滚文字）
             self.maybe_send_image_reply(cfg, ui, chat_name, ck, fresh)
         except OutputSafetyError as e:
@@ -1234,6 +1409,43 @@ class Resident:
         if removed:
             logging.info('maintain_media removed=%d freed_mb=%.1f keep_days=%s',
                          removed, freed / 1048576.0, keep_days)
+
+    def search_tool(self, cfg, calls):
+        """造一个交给模型调用的搜索执行器；calls 是调用记录，用来兜住"最多一次"。
+
+        失败一律当成"没搜到"：搜索是锦上添花，绝不能因为它把整条回复搞挂。
+        这里不抛异常——上层正处在发送链路里，一个网络抖动不该让消息丢掉。
+        """
+        def run(query):
+            if calls:
+                # 模型那侧靠"第二段不带 tools"保证只调一次，这里是第二道闸：
+                # 万一调用链被改动，或者模型一口气吐了多个 tool_call，也不会多花钱。
+                logging.info('web_search_extra_call_ignored query=%s', str(query)[:40])
+                return []
+            query = str(query or '').strip()
+            if not query:
+                return []
+            block = cfg.get('web_search') or {}
+            if not block.get('enabled', True):
+                return []
+            calls.append(0)                    # 先占位：失败也算"查过了"，不允许再来一次
+            try:
+                searcher = getattr(self, 'searcher', None)
+                if searcher is None:
+                    searcher = self.searcher = WebSearch(self.db, block)
+                else:
+                    searcher.configure(block)  # 配置热更新：改 json 不用重启
+                items = searcher.search(query, ori_question=query,
+                                        aliases=cfg.get('mention_aliases') or [])
+                calls[-1] = len(items)
+                self.status('web_searched', hits=len(items), query=query[:40],
+                            error=(getattr(searcher, 'last_error', '') or '')[:60])
+                return items
+            except Exception as exc:      # noqa: BLE001 搜索失败不能拖垮回复
+                logging.warning('web_search_failed type=%s', type(exc).__name__)
+                self.status('web_search_failed', type=type(exc).__name__)
+                return []
+        return run
 
     def hot_cycle(self, cfg):
         """空闲时轮转刷新 RSSHub 热榜。
@@ -1412,6 +1624,18 @@ class Resident:
         if self.stop.exists():
             self.status('paused_stop_file')
             return
+        inside, why = self.online_now(cfg)
+        if not inside:
+            # 用户 2026-10-18：只在早上 8 点到晚上 10 点上线。窗口外整轮跳过，
+            # 状态写成 offline_window——health.py 一眼能看出"不是坏了，是到点下班"。
+            if not getattr(self, '_offline_logged', False):
+                logging.info('offline_window 不在上线窗口内，本轮跳过（%s）', why)
+                self.status('offline_window', reason=why)
+                self._offline_logged = True
+            return
+        if getattr(self, '_offline_logged', False):
+            logging.info('online_window 已进入上线窗口，恢复工作')
+            self._offline_logged = False
         ui = WeChatUI(cfg)
         model = StepPlan(cfg, self.db)      # 带上 db：真实 usage / 错误分类落到 model_calls
         self._model = model                 # 供 status 暴露模型健康（看门狗据此告警）
@@ -1468,6 +1692,9 @@ class Resident:
             if self.quota.depth() >= before:      # 重排队/等待额度：本轮不再空转
                 break
             served += 1
+        # 后台生好的图在这里发：主循环是 UI 的唯一属主，先于空闲维护任务做
+        # （图是用户刚要的东西，优先级高于热榜/学习这类家务活）。
+        self.flush_pending_images(cfg, ui)
         logging.info('cycle_timing observe=%.1fs queue=%.1fs served=%d depth=%d',
                      observe_s, time.time() - t_queue, served, self.quota.depth())
         if self.quota.depth() == 0:

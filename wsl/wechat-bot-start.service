@@ -1,0 +1,11 @@
+[Unit]
+Description=Start WeChat bot at the beginning of the 08:00-22:00 window
+# 微信栈（Xvfb + 微信 + VNC）必须先在：机器人要截图和键鼠。
+After=wechat-stack.service
+Requires=wechat-stack.service
+
+[Service]
+Type=oneshot
+# 脚本自己会再看一次时间：定时器 Persistent=true 会在开机后补跑，
+# 半夜开机不能把机器人拉起来。
+ExecStart=/bin/sh /mnt/d/AgentPrograms/wechat-bot/wsl/bot-schedule.sh start

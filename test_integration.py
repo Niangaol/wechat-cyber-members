@@ -94,8 +94,13 @@ class FakeModel:
         self.calls = []
     def key(self):
         return 'fake-key'
-    def reply(self, new_messages, history, web_sources, chat_context=None, hot_items=None):
+    def reply(self, new_messages, history, web_sources, chat_context=None, hot_items=None,
+              search_fn=None):
+        # search_fn 是"模型自己调搜索工具"的实参：resident 会传，这里必须收下——
+        # 签名落后会让所有集成测试在 TypeError 上集体挂掉（2026-10-18 踩过一次）。
         self.calls.append('reply')
+        self.search_fn = search_fn
+        self.hot_items = hot_items
         return self.reply_text
     def call(self, messages, max_tokens=900):
         self.calls.append(max_tokens)
@@ -171,6 +176,10 @@ BASE_CFG = {
                   'api_key_env': 'STEP_PLAN_API_KEY_TEST_NOPE', 'credential_file': 'credentials.json',
                   'timeout': 5, 'reasoning_effort': 'low'},
     'automation': {'enabled': True},
+    # 上线窗口在测试里关掉：否则整套测试会依赖墙上时钟——早上 8 点跑全过、
+    # 半夜跑全挂（2026-10-18 22:10 实测踩到，12 个集成测试同时红）。
+    # 窗口规则本身由 test_online_window.py 用注入 hour 的方式单独验。
+    'online_window': {'enabled': False},
     # 群普通消息策略：测试里默认"全接"（要验的是别的行为）；
     # 正式群的 selective 规则由 test_group_policy.py 单独验。
     'groups': {'测试群': {'plain_mode': 'all'}, '家庭群': {'plain_mode': 'all'},

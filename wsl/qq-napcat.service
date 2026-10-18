@@ -1,0 +1,36 @@
+[Unit]
+Description=NapCat Shell（可选组件：QQ NT 客户端 + OneBot 适配器，作为 ws 客户端连 NoneBot 的 18080）
+Documentation=file:///mnt/d/AgentPrograms/wechat-bot/docs/QQ.md
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+# 这是【可选】单元（本机 NapCat 的安装方式是 rootless：装在 ~/Napcat，不需要 sudo）。
+# 没装就不该刷报错日志：ConditionPathExists 不满足时 systemd 把这次启动标成 condition failed，
+# 不进重启循环。安装位置不同就改下面这一行与 ExecStart 的路径。
+ConditionPathExists=%h/Napcat/opt/QQ/qq
+# 同样刻意不写 PartOf / BindsTo / Requires=wechat-*：NapCat 与微信互不影响。
+
+[Service]
+Type=simple
+# NapCat 是 QQ NT 客户端，必须有 X；xvfb-run 给它开一次性虚拟屏（不需要人能看见，
+# 也绝不复用微信的 :99）。前置依赖 xvfb（rootless 安装时一并装好的，见 docs/QQ.md）。
+# 手工前台跑等价于：xvfb-run -a /home/<用户>/Napcat/opt/QQ/qq --no-sandbox
+WorkingDirectory=%h
+# 可选环境文件：只放代理/证书变量，或下面那个快速登录参数。不存在也不报错（前缀 "-"）。
+EnvironmentFile=-%h/.config/qq-bot/napcat.env
+# QQ_BOT_QQ_ARGS 形如 "-q 123456789"（快速登录）。留空则省略该参数，启动后在 WebUI 扫码登录。
+# QQ 号本身不进仓库，只写在 600 权限的 ~/.config/qq-bot/napcat.env 里。
+ExecStart=/usr/bin/xvfb-run -a %h/Napcat/opt/QQ/qq --no-sandbox $QQ_BOT_QQ_ARGS
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+LimitCORE=0
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
+# 与本单元并列的另一种后台方式（不装 systemd 时用，官方文档同款）：
+#   screen -dmS napcat xvfb-run -a ~/Napcat/opt/QQ/qq --no-sandbox
+#   screen -S napcat -X quit      # 停止
+# 本单元与 screen 别同时开：两个 QQ NT 进程抢同一份配置目录会互相踢下线。

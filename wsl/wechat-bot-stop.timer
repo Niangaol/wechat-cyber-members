@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily 22:00 stop of the WeChat bot (online window ends)
+
+[Timer]
+OnCalendar=*-*-* 22:00:00
+# 开机后补跑：22 点时在关机，开机后要立刻停，不能让它跑一整夜
+Persistent=true
+
+[Install]
+WantedBy=timers.target

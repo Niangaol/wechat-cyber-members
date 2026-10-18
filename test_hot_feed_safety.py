@@ -1,7 +1,7 @@
 import sqlite3, sys, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent/'src'))
-from search import HotFeed
+from search import HotFeed, needs_search
 from moments_safe import is_safe, sanitize_for_moment
 
 SAMPLE = [
@@ -47,6 +47,34 @@ class HotFeedSafetyTests(unittest.TestCase):
     def test_sanitize_rejects_sensitive_moment(self):
         with self.assertRaises(ValueError):
             sanitize_for_moment('今天看到习近平的新闻')
+
+
+class TriggerTests(unittest.TestCase):
+    """触发词表：决定一条消息要不要去联网查。
+
+    2026-10-18 实机漏搜的复盘用例——群里问「dsv4.1flash1017 版本怎么样」，
+    旧表一个字都没命中，机器人只能回"没查到具体信息"，搜索功能形同没接。
+    """
+
+    def test_real_miss_from_group_chat_now_triggers(self):
+        self.assertTrue(needs_search('@年糕 Agent dsv4.1flash1017 版本怎么样'))
+
+    def test_version_and_price_questions_trigger(self):
+        for text in ['这游戏什么版本了', '现在多少钱', '价格多少', '参数怎么样',
+                     '和上一代对比', '哪款更值得买', '哪个好', '求推荐', '这家靠谱吗',
+                     '什么时候发布的', '更新了吗']:
+            with self.subTest(text=text):
+                self.assertTrue(needs_search(text), text)
+
+    def test_plain_chat_does_not_trigger(self):
+        for text in ['哈哈哈', '吃了吗', '我先去上课了', '好嘞', '晚安']:
+            with self.subTest(text=text):
+                self.assertFalse(needs_search(text), text)
+
+    def test_old_words_still_work(self):
+        for text in ['今天有什么热搜', '最新消息', '有什么新闻', '太火了']:
+            with self.subTest(text=text):
+                self.assertTrue(needs_search(text), text)
 
 
 if __name__ == '__main__':

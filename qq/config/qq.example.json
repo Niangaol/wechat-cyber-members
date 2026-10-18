@@ -1,0 +1,109 @@
+{
+  "_说明": "QQ 侧配置（qq-nonebot）。字段 schema = qq/core/INTERFACES.md 第 9 节（冻结版），本文件与它逐字对应；真正生效的是同目录的 qq.json，那份不进仓库（QQ 号只出现在本地文件里）。",
+  "_用法": "cp qq/config/qq.example.json qq/config/qq.json，然后按需改：① onebot.token 填随机串（或 export QQ_BOT_ONEBOT_TOKEN）② groups 里加要接的群 ③ 验收后把 auto_send 改 true。JSON 不能写注释，所有说明都写成下划线开头的键：程序只读固定字段，下划线开头的会被当未知字段忽略并 warn（契约 §9.5）。",
+  "self_id": "",
+  "_self_id_说明": "要绑定的 QQ 号（字符串）。留空 = 登录后自动绑定，并把结果写回 state_dir/self_id.txt。",
+  "state_dir": "/home/niangao/.local/state/qq-bot",
+  "_state_dir_说明": "QQ 自己的运行状态目录（db、media、STOP、status.json 都在这），与微信的 ~/.local/state/wechat-bot/ 完全分开；支持 ~，程序内 expanduser 后建目录并 chmod 700。",
+  "auto_send": false,
+  "_auto_send_说明": "总闸：false = 只记录/入队，不发送任何消息。首次部署默认关，联调确认事件与队列正常后再改 true。",
+  "onebot": {
+    "host": "127.0.0.1",
+    "port": 18080,
+    "path": "/onebot/v11/ws",
+    "token": "",
+    "token_env": "QQ_BOT_ONEBOT_TOKEN",
+    "_说明": "NoneBot 侧反向 WebSocket 监听：NapCat 作为客户端连 ws://127.0.0.1:18080/onebot/v11/ws。access token 生效顺序 = 环境变量 QQ_BOT_ONEBOT_TOKEN 优先，其次本文件的 token；两者都空时 qq/bot.py 直接拒绝启动（fail-closed，绝不无鉴权开监听）。适配器只认请求头 Authorization: Bearer <token>，NapCat 的反向 ws 里必须填同一个串。临时联调可用环境变量 QQ_BOT_PORT / QQ_BOT_HOST 覆盖端口与地址。",
+    "_path_说明": "适配器把反向 ws 路由写死在 /onebot/v11/ 、/onebot/v11/ws 、/onebot/v11/ws/ 三处；改成别的值 NapCat 就连不上（python3 -m qq.bot --check 会提示）。"
+  },
+  "napcat": {
+    "webui_host": "127.0.0.1",
+    "webui_port": 6099,
+    "_说明": "只给部署脚本/文档比对，程序不读。WebUI 必须绑 127.0.0.1：0.0.0.0 等于把管理面板暴露到局域网，不合格。"
+  },
+  "direct_policy": "blacklist",
+  "direct_blacklist": [],
+  "direct_whitelist": [],
+  "_direct_说明": "私聊策略：blacklist = 名单外都回；whitelist = 只回名单里的。写别的值按 blacklist 处理并 warn（fail-closed）。名单里填 QQ 号字符串。",
+  "group_policy": "whitelist",
+  "groups": {},
+  "_groups_说明": "群白名单，键 = 群号字符串。空 {} = 谁都不接（最保守的默认值）；只有登记进来的群才会被处理，没登记的群连时间线都不记。",
+  "_groups_示例": {
+    "_说明": "JSON 写不了注释，两种常用策略放这里当模板；要接某个群就把键换成真实群号（例如 123456789，记得加引号）搬进上面的 groups。",
+    "at_only（最保守，默认）": {
+      "plain_mode": "at_only",
+      "plain_cooldown_s": 120,
+      "plain_per_hour": 6,
+      "followup_window_s": 60
+    },
+    "idle（@ 必回 + 喊名字/追问 + 空闲时闲聊）": {
+      "plain_mode": "idle",
+      "plain_cooldown_s": 120,
+      "plain_per_hour": 6,
+      "followup_window_s": 60
+    }
+  },
+  "mention_aliases": ["年糕Agent", "年糕"],
+  "_mention_aliases_说明": "群里文本命中这些词就当被叫了（按最高优先级接话）；@ 机器人本身永远必回。",
+  "limits": { "window_5h": 100, "window_1d": 500 },
+  "_limits_说明": "模型调用额度：5 小时 100 次、24 小时 500 次。QQ 用自己那份 db，与微信额度互不影响。",
+  "min_reply_seconds": 3,
+  "max_replies_per_hour": 30,
+  "max_pending": 200,
+  "task_ttl_seconds": 600,
+  "reply_max_chars": 200,
+  "reply_image_limit": 2,
+  "_节流说明": "min_reply_seconds = 同一会话两条回复的最小间隔；max_replies_per_hour = 每小时最多回几条（0 = 不限）；max_pending = 队列上限（满了新事件直接拒，不排队）；task_ttl_seconds = 入队任务的保鲜期，过期不再回复（避免深夜的活第二天早上才发）；reply_max_chars = 单条回复字符上限；reply_image_limit = 一条回复最多挂几张图。",
+  "image_generation": {
+    "enabled": false,
+    "max_per_hour": 3,
+    "credentials_file": "/home/niangao/.local/state/wechat-bot/credentials.json"
+  },
+  "_image_generation_说明": "默认关：开了才会在消息明确要图时生图（每次回复最多 1 张、每会话每小时 ≤3 张）。credentials_file 指向微信那份共享凭据（绝对路径、600 权限、只有 niangao 能读）——故意复用，不复制密钥，两处轮换只改一个文件。",
+  "media": { "max_bytes": 10485760, "timeout_s": 15, "max_images": 2, "keep_days": 14 },
+  "_media_说明": "别人发来的图片：单张 ≤10MB、下载超时 15s、每条消息最多处理 2 张、落盘最多留 14 天。只允许公网 http/https、拒绝私网与本机地址（防 SSRF）。",
+  "model": {
+    "enabled": true,
+    "base_url": "https://api.stepfun.com/step_plan/v1",
+    "model": "step-3.7-flash",
+    "api_key_env": "STEP_PLAN_API_KEY",
+    "credential_file": "/home/niangao/.local/state/wechat-bot/credentials.json",
+    "credential_key": "step_plan_api_key",
+    "timeout": 90,
+    "reasoning_effort": "low",
+    "max_retries": 2,
+    "breaker_after": 3,
+    "breaker_seconds": 60,
+    "temperature": 0.1,
+    "_说明": "回复模型：StepFun step-3.7-flash（与微信侧 2026-10-17 的选择保持一致，快且便宜）。密钥绝不写在这里：先看环境变量 STEP_PLAN_API_KEY，再看 credential_file 里的 step_plan_api_key。",
+    "_凭据说明": "credential_file 用**绝对路径**指向微信那份共享凭据（600 权限）；src/model_api.py 里绝对路径会覆盖 state_dir，所以 QQ 不需要另存一份密钥。",
+    "_enabled_说明": "true = 用本段配置（模型与会话文件都落在 QQ 的 state_dir）；改回 false 且没有 step_plan 段时，qq/core 会因拿不到配置而拒绝生成——这是故意的，宁可明确失败也不要静默用错端点。"
+  },
+  "web_search": {
+    "enabled": true,
+    "provider": "tavily",
+    "credential_file": "/home/niangao/.local/state/wechat-bot/credentials.json",
+    "timeout": 8,
+    "cache_ttl": 600,
+    "max_per_hour": 30,
+    "max_items": 5,
+    "max_summary_chars": 500,
+    "fetch_top1": false,
+    "tavily": { "count": 5, "search_depth": "basic", "min_score": 0.3 },
+    "_说明": "只有消息命中 needs_search（最新/新闻/价格/版本…）才联网查一次，每次回复最多一次；查不到就静默降级，不影响回复。key 复用共享凭据里的 tavily_api_key（或环境变量 TVAILY_API_KEY），不写这里。"
+  },
+  "links": {
+    "enabled": true,
+    "max_urls": 2,
+    "max_bytes": 250000,
+    "max_chars": 9000,
+    "timeout": 10,
+    "total_budget_seconds": 12,
+    "_说明": "链接阅读（契约 §7.1/§10）：消息文本里出现 http(s) 链接时，最多读 max_urls 个、整体预算 total_budget_seconds 秒，结果作为不可信素材交给模型；只允许公网 http/https（DNS 固定 + 拒绝私网，照抄 src/web_reader.py）。任何失败/超时都退回空列表，绝不影响文字回复。默认开：别人贴链接就该能读。"
+  },
+  "hot_feed": {
+    "enabled": false,
+    "refresh_seconds": 300,
+    "_说明": "默认关：RSSHub 是第三方慢源，装机即出网不合适；要热榜自己把 enabled 改成 true（开了以后走独立线程、一轮只刷一个源、只在队列空闲时刷）。热榜源与实例列表写死在 src/search.py 里，这里只控制开关与刷新节流（300 秒一次）。"
+  }
+}

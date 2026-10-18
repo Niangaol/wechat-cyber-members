@@ -1,0 +1,11 @@
+# QQ 接入依赖（NoneBot2 + OneBot v11 适配器）。
+# 版本按 2026-10-18 的 PyPI 现状 + lead 本机 venv 实测钉死，依据与复核命令写在 qq/README.md：
+#   nonebot2 2.5.0              PyPI 最新稳定版；requires-python >=3.10,<4.0（WSL 是 3.12.3）
+#   nonebot-adapter-onebot 2.4.6 PyPI 最新版；要求 nonebot2>=2.2.0,<3.0.0（与 2.5.0 兼容）
+# [fastapi] extra 带进 FastAPI + uvicorn：反向 WebSocket 监听（NapCat 作为客户端连过来）靠它。
+nonebot2[fastapi]==2.5.0
+nonebot-adapter-onebot==2.4.6
+
+# qq/core/media.py 用 PIL 校验别人发来的图片；Ubuntu 24.04 的系统 python 已装 Pillow 10.2.0，
+# 用 venv 部署时要显式装上这一条。
+pillow>=10.2

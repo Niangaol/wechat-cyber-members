@@ -53,9 +53,13 @@ def load_credentials(path=None):
 class ModelProvider:
     """一个 OpenAI-compatible 端点 + 它的密钥、重试策略和健康状态。"""
 
-    def __init__(self, block, name='main', session_file=None):
+    def __init__(self, block, name='main', session_file=None, state_dir=None):
         block = dict(block or {})
         self.name = name
+        # 状态目录可注入：QQ 入口用 ~/.local/state/qq-bot/，微信默认仍是老目录（行为不变）。
+        # credential_file 写成绝对路径时 pathlib 的除法会让绝对路径生效，
+        # 于是 QQ 可以共享微信那份 600 权限的凭据文件，而不用复制密钥。
+        self.state_dir = Path(state_dir) if state_dir else Path(block.get('state_dir') or STATE)
         self.base_url = str(block.get('base_url') or '').rstrip('/')
         self.model = str(block.get('model') or '')
         self.api_key_env = str(block.get('api_key_env') or '')
@@ -71,7 +75,7 @@ class ModelProvider:
         self.extra_body = dict(block.get('extra_body') or {})
         self.app_user_agent = str(block.get('app_user_agent') or '')
         self.session_header = str(block.get('session_header') or '')
-        self.session_file = session_file or (STATE / 'model-session.txt')
+        self.session_file = session_file or (self.state_dir / 'model-session.txt')
         self._instance_id = ''          # 进程级稳定会话（持久化）
         self.active_session = ''        # 当前会话（按 chat_key 设置，发完就换别的）
         self.recorder = None            # callable(record: dict)
@@ -86,7 +90,7 @@ class ModelProvider:
             from_env = os.environ.get(self.api_key_env, '')
             if from_env:
                 return from_env
-        creds = load_credentials(STATE / self.credential_file)
+        creds = load_credentials(self.state_dir / self.credential_file)
         for field in (self.credential_key, 'api_key'):
             if field and creds.get(field):
                 return str(creds[field])
@@ -154,9 +158,14 @@ class ModelProvider:
             headers[self.session_header] = session_id
         return headers
 
-    def _payload(self, messages, max_tokens, model=None):
+    def _payload(self, messages, max_tokens, model=None, tools=None, tool_choice=None):
         payload = {'model': model or self.model, 'messages': messages,
                    'max_tokens': max_tokens, 'stream': False}
+        # 只有显式传了才带上：不是每个 OpenAI 兼容端点都认 tools，
+        # 无条件带会让不支持的工具端点直接 400，连普通回复都发不出去。
+        if tools:
+            payload['tools'] = tools
+            payload['tool_choice'] = tool_choice or 'auto'
         if self.temperature is not None:
             payload['temperature'] = self.temperature
         if self.reasoning_effort:
@@ -166,6 +175,20 @@ class ModelProvider:
 
     def chat(self, messages, max_tokens=1800, model=None, session_id=None):
         """发一次调用；返回 (text, usage dict)。失败抛 ModelUnavailable/ModelAuthError。"""
+        text, _tool_calls, usage = self._run(messages, max_tokens, model, session_id)
+        return text, usage
+
+    def chat_turn(self, messages, max_tokens=1800, model=None, session_id=None,
+                  tools=None, tool_choice=None):
+        """一次对话回合：可能只要工具不要正文。返回 (text, tool_calls, usage)。
+
+        工具调用的响应正文是空的（模型把要说的话放进 tool_calls 的 arguments），
+        所以不能走 chat()——那条路会把"没有正文"当成失败。
+        """
+        return self._run(messages, max_tokens, model, session_id, tools, tool_choice)
+
+    def _run(self, messages, max_tokens=1800, model=None, session_id=None,
+             tools=None, tool_choice=None):
         if self.disabled_reason:
             raise ModelAuthError('%s 已停用：%s' % (self.name, self.disabled_reason))
         if not self.key():
@@ -178,7 +201,8 @@ class ModelProvider:
         for attempt in range(self.max_retries + 1):
             started = time.time()
             try:
-                text, usage = self._once(messages, max_tokens, model, session_id)
+                text, tool_calls, usage = self._once(messages, max_tokens, model,
+                                                     session_id, tools, tool_choice)
             except ModelAuthError:
                 self.disabled_reason = '认证失败(401/403)，需要人工处理'
                 self.note_failure('auth')
@@ -230,13 +254,13 @@ class ModelProvider:
                 raise ModelUnavailable('响应解析失败: %s' % str(exc)[:80])
             else:
                 self.note_success()
-                return text, usage
+                return text, tool_calls, usage
         self.note_failure(type(last).__name__ if last else 'unknown')
         raise last or ModelUnavailable('未知失败')
 
-    def _once(self, messages, max_tokens, model, session_id):
+    def _once(self, messages, max_tokens, model, session_id, tools=None, tool_choice=None):
         url = self.base_url + '/chat/completions'
-        payload = self._payload(messages, max_tokens, model)
+        payload = self._payload(messages, max_tokens, model, tools, tool_choice)
         headers = self._headers(session_id or self.active_session or self.instance_session())
         req = urllib.request.Request(url, json.dumps(payload, ensure_ascii=False).encode(),
                                      headers=headers)
@@ -255,12 +279,19 @@ class ModelProvider:
         choice = (parsed.get('choices') or [{}])[0]
         if choice.get('finish_reason') == 'length':
             raise ValueError('模型输出被长度截断')
-        text = (choice.get('message') or {}).get('content')
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError('模型无有效正文')
+        message = choice.get('message') or {}
+        tool_calls = message.get('tool_calls')
+        if not isinstance(tool_calls, list):
+            tool_calls = []
+        text = message.get('content')
+        if not tool_calls:
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError('模型无有效正文')
+        elif not isinstance(text, str):
+            text = ''
         usage = parsed.get('usage') or {}
         self._record(True, started, usage=usage, model=model)
-        return text, usage
+        return text, tool_calls, usage
 
     def _record(self, ok, started, usage=None, error='', model=None):
         if not self.recorder:
@@ -277,20 +308,24 @@ class ModelProvider:
             pass
 
 
-def resolve_providers(cfg):
-    """解析出 {'main': provider, 'ocr': provider or None}；兼容旧的 step_plan 结构。"""
+def resolve_providers(cfg, state_dir=None):
+    """解析出 {'main': provider, 'ocr': provider or None}；兼容旧的 step_plan 结构。
+
+    state_dir 让调用方（例如 QQ 入口）把凭据/session 落到自己的目录；不传时
+    与历史行为完全一致（微信侧），所以现有调用方不受影响。
+    """
     cfg = cfg or {}
     new_block = cfg.get('model')
     # enabled=false 表示"已经写好但还没切换"：继续用旧配置，切换是显式的一步
     if isinstance(new_block, dict) and new_block.get('enabled', True):
-        main = ModelProvider(new_block, 'main')
+        main = ModelProvider(new_block, 'main', state_dir=state_dir)
         ocr_block = new_block.get('ocr')
         if isinstance(ocr_block, dict) and ocr_block.get('enabled') is not False:
             if ocr_block.get('mode') == 'disabled' or ocr_block.get('base_url') in ('', None) \
                     and ocr_block.get('mode') == 'disabled':
                 ocr = None
             elif ocr_block.get('base_url'):
-                ocr = ModelProvider(ocr_block, 'ocr')
+                ocr = ModelProvider(ocr_block, 'ocr', state_dir=state_dir)
             else:
                 ocr = main                      # 同端点同密钥（例如都走 Go）
         else:
@@ -298,13 +333,13 @@ def resolve_providers(cfg):
     else:
         legacy = dict(cfg.get('step_plan') or {})
         legacy.setdefault('credential_key', 'step_plan_api_key')
-        main = ModelProvider(legacy, 'main')
+        main = ModelProvider(legacy, 'main', state_dir=state_dir)
         # 旧配置里 OCR 是"同端点、另一个小模型"（step-3.7-flash），且不该带 reasoning_effort
         ocr_model = (cfg.get('step_plan') or {}).get('ocr_model')
         if ocr_model and ocr_model != main.model:
             ocr_block = dict(legacy, model=ocr_model)
             ocr_block.pop('reasoning_effort', None)
-            ocr = ModelProvider(ocr_block, 'ocr')
+            ocr = ModelProvider(ocr_block, 'ocr', state_dir=state_dir)
         else:
             ocr = main
     return {'main': main, 'ocr': ocr}

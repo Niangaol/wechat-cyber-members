@@ -33,3 +33,7 @@ credentials*.json.*
 
 # ---- 微信客户端目录（如果以后链进来）----
 xwechat_files/
+
+# ---- QQ 侧本地配置（示例入库，真配置/凭据不进仓库）----
+qq/config/qq.json
+qq/config/qq.env

@@ -9,6 +9,8 @@ def public_endpoint(url):
     p=urlsplit(url)
     if p.scheme not in ('http','https') or not p.hostname or p.username or p.password:
         raise WebSafetyError('仅允许无凭据HTTP(S)链接')
+    # 显式 :0 不能折成默认端口（老写法 p.port or 80 会把 :0 变成 80，绕过端口白名单检查）
+    if p.port == 0: raise WebSafetyError('禁止端口 0')
     port=p.port or (443 if p.scheme=='https' else 80)
     if port not in (80,443): raise WebSafetyError('禁止非标准端口')
     host=p.hostname.encode('idna').decode('ascii')
@@ -17,7 +19,11 @@ def public_endpoint(url):
     if not ips: raise WebSafetyError('DNS无结果')
     for ip in ips:
         address=ipaddress.ip_address(ip)
-        if not address.is_global or (getattr(address,'ipv4_mapped',None) and not address.ipv4_mapped.is_global):
+        # is_global 对组播是 True（实测 224.0.0.1 / ff02::1），只看它会漏掉 224/4 与 ff00::/8，
+        # 所以组播、保留地址显式挡；v4-mapped 的 IPv6 拆开按同样规则看。
+        mapped=getattr(address,'ipv4_mapped',None)
+        targets=[address]+([mapped] if mapped else [])
+        if any((not a.is_global) or a.is_multicast or a.is_reserved for a in targets):
             raise WebSafetyError('禁止私网、本机、保留地址和混合DNS结果')
     return p,host,port,ips[0]
 
