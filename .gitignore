@@ -30,6 +30,12 @@ credentials*.json.*
 # ---- 意外产物 ----
 %SystemDrive%/
 *.db
+*.db-shm
+*.db-wal
+
+# ---- 突变测试产物（verify_qq/mutations/ 里有指向 src 的符号链接和复制来的
+#      测试文件，跑完即弃，不入库；验证套件本体 v1-v9/REPORT.md 照常入库）----
+verify_qq/mutations/
 
 # ---- 微信客户端目录（如果以后链进来）----
 xwechat_files/

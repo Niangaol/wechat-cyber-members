@@ -1,0 +1,35 @@
+基线：先在未突变的副本里跑一遍（必须全绿，否则突变结论不可信）
+  基线第 1 次：绿（剔除已知 flaky 后无失败）
+
+M01   @全体 被当成 @我                         杀死（2 个用例变红）13s  例：test_at_all_is_not_at_me
+M02   不再丢弃"自己发的消息"                       杀死（2 个用例变红）15s  例：test_notice_and_self_message_never_queue
+M03   message_id 缺失也放行（去重键会撞）            杀死（2 个用例变红）14s  例：test_missing_message_id_is_dropped
+M04   dedupe_key 去掉 self_id（跨账号撞键）       杀死（1 个用例变红）13s  例：test_array_message_is_parsed
+M05   未登记的群也回话（白名单失效）                    杀死（3 个用例变红）15s  例：test_status_timestamps_follow_events_and_sends
+M06   配置类型不对时 fail-OPEN（改成 reply）        杀死（6 个用例变红）14s  例：test_bad_blacklist_type_is_ignored
+M07   plain_mode 默认改成 all（最宽松）           杀死（4 个用例变红）18s  例：test_group_without_plain_mode_stays_conservative_end_to_end
+M08   别名命中降级成普通优先级                       杀死（2 个用例变红）13s  例：test_text_fake_at_hits_alias
+M09   去掉 min_reply_seconds 频率闸           杀死（2 个用例变红）15s  例：test_gate_also_applies_to_at_me
+M10   私聊黑名单失效                            杀死（4 个用例变红）13s  例：test_bad_blacklist_type_is_ignored
+M11   去掉像素上限（解压炸弹放行）                     杀死（1 个用例变红）13s  例：test_rejects_pixel_bomb
+M12   去掉端口白名单                            *** 存活（无新增失败）*** 15s
+M13   失败时把异常抛给调用方（不再返回 None）             杀死（15 个用例变红）13s  例：test_junk_input_never_propagates
+M14   seen() 永不去重（同一条消息回两遍）              杀死（2 个用例变红）15s  例：test_duplicate_message_id_only_queued_once
+M15   auto_send=false 也照样发送              杀死（1 个用例变红）18s  例：test_auto_send_off_records_but_never_sends
+M16   STOP 文件不再拦住发送                      杀死（1 个用例变红）15s  例：test_stop_check_inside_processing_blocks_generation
+M17   跳过输出安全闸（超长原文直发）                    杀死（1 个用例变红）18s  例：test_unsafe_reply_is_blocked
+M18   unknown（结果未知）记成 ok 台账              杀死（2 个用例变红）15s  例：test_unknown_send_does_not_refresh_confirmed_timestamp
+M19   queue_full 闸失效（队列无限增长）             杀死（1 个用例变红）13s  例：test_queue_full_rejects
+M20   跳过任务保鲜期（深夜的活第二天早上还回）               杀死（1 个用例变红）20s  例：test_task_ttl_expires_stale_queue_items
+M21   普通回复全变成 context_only（reason 不变）    杀死（11 个用例变红）23s  例：test_all_group_replies
+M22   真 @ 的优先级被降级成普通（action 不变）          杀死（2 个用例变红）13s  例：test_at_me_replies_with_top_priority
+M23   追问命中降级成普通优先级（action 不变）            杀死（1 个用例变红）16s  例：test_question_within_window_replies
+M24   plain_per_hour 上限失效（每小时不限量）        杀死（2 个用例变红）13s  例：test_plain_per_hour_cap_blocks
+M25   idle 模式的队列忙判定失效（把别人的 @ 挤后面）        杀死（2 个用例变红）15s  例：test_idle_group_stays_quiet_when_queue_busy
+
+==========================================================================
+突变测试结果：共 25 个突变，杀死 24，存活 1，未能应用 0
+
+!! 现有测试**覆盖不到**的行为（突变存活 = 测试缺口）：
+   M12   去掉端口白名单
+==========================================================================

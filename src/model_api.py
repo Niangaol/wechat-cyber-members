@@ -36,6 +36,21 @@ class ModelCircuitOpen(ModelUnavailable):
     """熔断打开：连续失败太多次，这段时间直接失败，不打到服务端。"""
 
 
+class ModelParseError(ValueError):
+    """响应体拿到了但不可用：被长度截断、没有正文、不是 JSON。
+
+    仍是 ValueError 子类（历史上调用方按 ValueError 兜底，行为不变），
+    但多带两样东西：
+    - reason：truncated / empty_body / not_json / too_large，落账本做直方图；
+    - usage：失败时响应体里往往也有真实用量，一起记，账本才不少算。
+    """
+
+    def __init__(self, message, reason='parse', usage=None):
+        super().__init__(message)
+        self.reason = reason
+        self.usage = usage or {}
+
+
 def _with_jitter(seconds):
     return max(0.0, seconds * (0.8 + 0.4 * random.random()))
 
@@ -248,9 +263,13 @@ class ModelProvider:
                     time.sleep(_with_jitter(1.5 * (2 ** attempt)))
                     continue
             except ValueError as exc:
-                # 响应解析失败：不是网络问题，交给调用方按"模型不可用"处理
-                self._record(False, started, error='parse', model=model)
-                self.note_failure('parse')
+                # 响应解析失败：不是网络问题，交给调用方按"模型不可用"处理。
+                # reason 细到 truncated/empty_body/not_json：以前三种全记成 parse，
+                # 2026-10-19 就是因此把"OCR 预算被思考+正文挤爆"误判成别的问题，白查半天。
+                reason = getattr(exc, 'reason', 'parse')
+                self._record(False, started, error=reason, model=model,
+                             usage=getattr(exc, 'usage', None))
+                self.note_failure(reason)
                 raise ModelUnavailable('响应解析失败: %s' % str(exc)[:80])
             else:
                 self.note_success()
@@ -269,16 +288,19 @@ class ModelProvider:
             data = resp.read(4 * 1024 * 1024 + 1)
             status = getattr(resp, 'status', 200)
         if len(data) > 4 * 1024 * 1024:
-            raise ValueError('模型响应过大')
+            raise ModelParseError('模型响应过大', reason='too_large')
         try:
             parsed = json.loads(data)
         except ValueError as exc:
-            raise ValueError('响应不是JSON: %s' % str(exc)[:60])
+            raise ModelParseError('响应不是JSON: %s' % str(exc)[:60], reason='not_json')
         if status in (401, 403):
             raise ModelAuthError('HTTP %d 认证失败' % status)
+        # usage 先取出来：下面几条失败分支也要用它。以前失败一律不记 token，
+        # 账本会系统性少算（2026-10-19 对账才发现几十次失败调用没进账单）。
+        usage = parsed.get('usage') or {}
         choice = (parsed.get('choices') or [{}])[0]
         if choice.get('finish_reason') == 'length':
-            raise ValueError('模型输出被长度截断')
+            raise ModelParseError('模型输出被长度截断', reason='truncated', usage=usage)
         message = choice.get('message') or {}
         tool_calls = message.get('tool_calls')
         if not isinstance(tool_calls, list):
@@ -286,10 +308,9 @@ class ModelProvider:
         text = message.get('content')
         if not tool_calls:
             if not isinstance(text, str) or not text.strip():
-                raise ValueError('模型无有效正文')
+                raise ModelParseError('模型无有效正文', reason='empty_body', usage=usage)
         elif not isinstance(text, str):
             text = ''
-        usage = parsed.get('usage') or {}
         self._record(True, started, usage=usage, model=model)
         return text, tool_calls, usage
 
@@ -338,8 +359,13 @@ def resolve_providers(cfg, state_dir=None):
         ocr_model = (cfg.get('step_plan') or {}).get('ocr_model')
         if ocr_model and ocr_model != main.model:
             ocr_block = dict(legacy, model=ocr_model)
-            ocr_block.pop('reasoning_effort', None)
-            ocr = ModelProvider(ocr_block, 'ocr', state_dir=state_dir)
         else:
-            ocr = main
+            # 同名（或没配 ocr_model）也必须单独建 OCR provider，不能图省事写 ocr = main：
+            # 1) 推理档位只属于主对话，OCR 带上会把预算吃光。2026-10-19 实测：批量 OCR
+            #    600 的预算被思考+正文挤爆，finish_reason=length，记成 parse 后悄悄退回
+            #    本机 tesseract，读错字还以为模型没调起来。
+            # 2) 共用一个熔断器：OCR 连挂 breaker_after 次，会把主回复一起挡 breaker_seconds 秒。
+            ocr_block = dict(legacy, model=ocr_model or main.model)
+        ocr_block.pop('reasoning_effort', None)
+        ocr = ModelProvider(ocr_block, 'ocr', state_dir=state_dir)
     return {'main': main, 'ocr': ocr}

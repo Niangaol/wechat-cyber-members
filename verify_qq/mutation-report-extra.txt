@@ -1,0 +1,9 @@
+基线：先在未突变的副本里跑一遍（必须全绿，否则突变结论不可信）
+  baseline returncode=1 -----
+Ran 256 tests in 10.159s
+
+FAILED (failures=1, skipped=7)
+ERROR:asyncio:Task was destroyed but it is pending!
+task: <Task cancelling name='Task-8' coro=<FakeBot.call_api() done, defined at /mnt/d/AgentPrograms/wechat-bot/verify_qq/mutations/_baseline/test_qq_plugin.py:125> wait_for=<Future cancelled> cb=[_chain_future.<locals>._call_set_state() at /usr/lib/python3.12/asyncio/futures.py:394]>
+
+  基线不绿，突变测试无意义，退出

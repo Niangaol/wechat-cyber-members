@@ -1,0 +1,3 @@
+# Windows 批处理必须保持 CRLF：autocrlf=input 会在入库时统一转 LF，
+# 而 cmd.exe 对 LF 的 goto/label 兼容性差，这三个启停脚本宁可保持原样。
+*.cmd text eol=crlf

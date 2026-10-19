@@ -57,7 +57,7 @@
   "poll_seconds": 1,
   "ui_backoff_seconds": 30,
   "debounce_seconds": 0.6,
-  "observe_full_sweep_seconds": 600,
+  "observe_full_sweep_seconds": 120,
   "observe_sweep_batch": 2,
   "observe_visit_cooldown_s": 5,
   "hot_refresh_seconds": 300,
@@ -178,6 +178,13 @@
     "max_per_hour": 30,
     "max_px": 512,
     "_说明": "2026-10-18 用户要求「说话要带图」：every_n=3 表示每 3 条回复补一张图（明确要图词则必发）。生图在后台线程跑（约 20 秒，不堵队列），发送仍由主循环做（UI 只能有一个属主）。max_per_hour=30 是每会话每小时的上限。max_px=512 是用户 2026-10-18 确认的「当表情包用，小一点没关系」：回复配图最长边压到 512，单张从 2.9MB 降到几百 KB，群里就是表情包观感；生图 API 仍按它自己的分辨率出图，我们在本地缩（所以 API 花费不随尺寸下降，降的只是体积/上传/磁盘）。想关：enabled=false。"
+  },
+  "kaomoji_reply": {
+    "enabled": true,
+    "keywords": ["颜文字", "来条颜文字", "来个颜文字", "颜文字呢", "kaomoji", "发表情"],
+    "max_per_hour": 30,
+    "cooldown_s": 10,
+    "_说明": "2026-10-19 用户要求「发送颜文字」：消息命中关键词时，机器人直接从内置颜文字库（src/kaomoji.py，55 条）随机回一条——不调模型、不花额度、零延迟，走的还是已验证的文字发送链路（切会话+标题核验+逐字回读+发送后复查）。keywords 里「颜文字」是子串，天然覆盖「来条颜文字/来个颜文字/颜文字呢」；kaomoji 大小写不敏感。max_per_hour=30 是每会话每小时上限，cooldown_s=10 是同一会话两条颜文字的最小间隔（防刷屏）；超限就降级回正常模型回复，不会不说话。群聊、私聊都生效。想关：enabled=false。"
   },
   "online_window": {
     "enabled": true,

@@ -1,10 +1,11 @@
 """常驻机器人：分级入队、共用额度池、分会话记忆、排队发送。缺Key/异常时默认不发。"""
-import argparse, fcntl, hashlib, json, logging, os, re, signal, sqlite3, threading, time
+import argparse, fcntl, hashlib, json, logging, os, random, re, signal, sqlite3, threading, time
 from pathlib import Path
 from urllib.parse import urlsplit
 from wechat_ui import (WeChatUI, SafetyError, UIUnavailable, normalize,
                        prepare_png_bytes)
 from imagegen import generate as generate_image, oc_prefix, OC_REF
+from kaomoji import KAOMOJI_POOL
 from multimodal import StepPlan, STATE, ModelUnavailable
 from web_reader import fetch_public_text
 from quota import (Quota, QuotaExceeded, PRIORITY_GROUP_AT, PRIORITY_DIRECT,
@@ -16,7 +17,7 @@ from moment_release import MomentRelease, ReleaseError, load_coords
 from moments_publisher import PublisherError
 from moment_interact import MomentInbox, InteractionPipeline, BATCH_SIZE
 from chat_navigator import (ChatNavigator, row_band_sig, row_changed,
-                            avatar_rows, avatar_key)
+                            avatar_rows, avatar_key, row_unread)
 from direct_registry import DirectRegistry
 from direct_discovery import DirectDiscovery
 from memory import ChatMemory
@@ -178,6 +179,8 @@ class Resident:
         self._row_y = {}         # 会话名 -> 列表行中心 y（上次成功切换时记下）
         self._avatar_of = {}     # 会话名 -> 头像指纹（把"行"和"会话"绑定，不靠 OCR 名字）
         self._visited_at = {}    # 会话名 -> 最近一次切进去观察的时间（防连续重访）
+        self._unread_since = {}  # 会话名 -> 角标从什么时候起一直亮着（角标触发的节流）
+        self._unread_px = {}     # 会话名 -> 上一轮看到的角标红像素数（日志/排查用）
         self._last_sweep = 0     # 上次全量扫描所有会话的时间
         self.baselines = {}      # chat_key -> [signature,...]
         self.last_frame = {}     # chat_key -> 观察时的聊天区截图（发送前比对用）
@@ -651,19 +654,54 @@ class Resident:
     def _row_changed(prev, sig):
         return row_changed(prev, sig)
 
+    def _unread_due(self, name, has_unread, now, cfg):
+        """角标这条触发线的节流：刚亮起立刻看；一直不消就每 recheck 秒复查一次。
+
+        没有这道节流，角标消不掉时会按 observe_visit_cooldown_s（5 秒）反复
+        切进去，一分钟十几次模型调用，账单直接爆。正常路径是：消息来了角标亮
+        → 切进去读完 → 角标灭，一次都不多花；只有"进去过但角标还在"才会按
+        recheck 秒重试，那正好是"刚才那次没成功读掉"的情况。
+        """
+        if not hasattr(self, '_unread_since'):
+            self._unread_since = {}
+        if not has_unread:
+            self._unread_since.pop(name, None)
+            return False
+        conf = cfg.get('observe_unread_badge') or {}
+        if not conf.get('enabled', True):
+            return False
+        since = self._unread_since.get(name)
+        if since is None:
+            self._unread_since[name] = now
+            return True
+        # 注意不能写成 conf.get('recheck_s', 60) or 60：显式配 0（= 每轮都复查）
+        # 会被 or 吞成 60。和本文件其它"0 表示关闭"的配置保持同一写法。
+        recheck = float(conf.get('recheck_s', 60) or 0)
+        return now - since >= recheck
+
     def plan_visits(self, cfg, ui, names):
         """先看会话列表动没动，再决定这一轮切进哪几个会话。
 
         用"头像指纹"把列表行绑定到会话（中文昵称 OCR 常读错，不能用来认行）：
         1) 截一帧，纯 numpy 找头像行（无 OCR，约 0.05s）；
         2) 行头像指纹 → 会话名（首次访问时学习）；
-        3) 行像素（名字+预览+角标）与上一轮一致 → 跳过；
+        3) 行像素（名字+预览+角标）与上一轮一致、且没有未读角标 → 跳过；
         4) 头像不在可视区 → 不切、也不滚动（来新消息会被顶到最上面，自然可见）。
         兜底：每 observe_full_sweep_seconds 秒补看 ≤observe_sweep_batch 个会话。
+
+        第 3 条里的"未读角标"是 2026-10-19 补的第二条触发线：签名只比"这一轮
+        和上一轮"，角标直接说"有没有没读的消息"。角标检测只在列表列右端
+        （x>=180）数红像素，头像照片里的红色天然被排除，见 chat_navigator.row_unread。
         """
         interval = float(cfg.get('observe_full_sweep_seconds', 600) or 0)
         batch = max(1, int(cfg.get('observe_sweep_batch', 2) or 2))
         now = time.time()
+        # 测试用 Resident.__new__ 手工装配，不一定走过 __init__：和本方法里其他
+        # 状态一样，角标这两个字典也现建（obsese_all 里 _visited_at 也是这么兜的）。
+        if not hasattr(self, '_unread_since'):
+            self._unread_since = {}
+        if not hasattr(self, '_unread_px'):
+            self._unread_px = {}
         sweep = (not interval) or (now - getattr(self, '_last_sweep', 0) >= interval)
         frame = ui.capture()
         rows = avatar_rows(frame)
@@ -688,7 +726,18 @@ class Resident:
                     continue
             sig = self._row_sig(frame, y)
             seen[name] = (y, sig)
-            if self._row_changed(self._row_sigs.get(name), sig):
+            # 两条触发线：①行像素变了（名字/预览/角标位置动过）②未读角标亮着。
+            # ②是①的补充而不是替代：签名只回答"和上一轮比变没变"，角标回答
+            # "现在有没有没读的消息"。2026-10-19 那次连续 6 分钟签名不变、新消息
+            # 干等 10 分钟兜底扫描，坑就坑在只有①——角标亮着却没人看它。
+            has_unread, unread_px = row_unread(frame, top, bot, cfg)
+            self._unread_px[name] = unread_px
+            # _unread_due 必须每次都调用（不能写在 or 的右边被短路）：它顺手维护
+            # "角标从什么时候亮起"的节流状态。写在右边时，签名一变化就跳过它，
+            # 于是每次签名变化之后角标线还会多触发一次——实测踩到过。
+            unread_due = self._unread_due(name, has_unread, now, cfg)
+            changed = self._row_changed(self._row_sigs.get(name), sig)
+            if changed or unread_due:
                 # 同一会话冷却：顶部浮动通知条/悬停态会让签名连跳，冷却把
                 # "反复切进来看同一行"限制在最多每 cooldown 秒一次。
                 cool = float(cfg.get('observe_visit_cooldown_s', 5) or 0)
@@ -710,8 +759,10 @@ class Resident:
             self._last_sweep = now
         chosen = list(dict.fromkeys(chosen))   # 同一会话可能被多行/兜底重复选中
         if chosen:
-            logging.info('observe_plan visits=%d/%d sweep=%s chosen=%s',
-                         len(chosen), len(names), sweep, ','.join(chosen)[:120])
+            lit = [n for n in chosen if self._unread_px.get(n)]
+            logging.info('observe_plan visits=%d/%d sweep=%s chosen=%s unread=%s',
+                         len(chosen), len(names), sweep, ','.join(chosen)[:120],
+                         ','.join(lit)[:80])
         return chosen
 
     def observe_all(self, cfg, ui, model):
@@ -876,6 +927,20 @@ class Resident:
         'max_px': 2048,      # 回复配图最长边；用户 2026-10-18 要求"当表情包"，配置里=512
     }
 
+    # ---------- 颜文字快捷回复（2026-10-19 用户要求「发送颜文字」） ----------
+    # 命中关键词时直接从 src/kaomoji.py 的池子里随机回一条：不调模型、不花额度、
+    # 零延迟，走的还是已验证的文字发送链路（切会话+标题核验+逐字回读+发送后复查）。
+    # 频率超限或没过输出闸就降级回正常模型回复，不会不说话、不会丢消息。
+    KAOMOJI_REPLY_DEFAULTS = {
+        'enabled': True,
+        # 触发词（2026-10-19 用户选定）。「颜文字」是子串，天然覆盖
+        # 「来条颜文字/来个颜文字/颜文字呢」；列全是为了配置里看得见、改起来清楚。
+        'keywords': ['颜文字', '来条颜文字', '来个颜文字', '颜文字呢',
+                     'kaomoji', '发表情'],
+        'max_per_hour': 30,   # 每会话每小时上限（纯文本不花额度，给宽点）
+        'cooldown_s': 10,     # 同一会话两条颜文字的最小间隔，防刷屏
+    }
+
     # 配图多样性（用户 2026-10-18：要有意义、不太一样，今天的自拍照太无趣了）：
     # 每条配图按顺序轮换一种构图/视角，保证连续两张不一样。
     IMAGE_VARIETY = [
@@ -925,6 +990,41 @@ class Resident:
         stamps = [t for t in getattr(self, 'image_sent', {}).get(ck, []) if now - t < 3600]
         self.image_sent[ck] = stamps
         return len(stamps) < max(1, int(conf.get('max_per_hour', 3) or 1))
+
+    # ---------- 颜文字快捷回复 ----------
+    def kaomoji_reply_conf(self, cfg):
+        conf = dict(self.KAOMOJI_REPLY_DEFAULTS)
+        conf.update(cfg.get('kaomoji_reply') or {})
+        return conf
+
+    @staticmethod
+    def wants_kaomoji(messages, conf):
+        """只看用户消息里有没有约定关键词；kaomoji 大小写不敏感。"""
+        words = [w for w in (conf.get('keywords') or []) if w]
+        if not words:
+            return False
+        text = ' '.join(str(m.get('text', '')) for m in messages).lower()
+        return any(str(w).lower() in text for w in words)
+
+    def kaomoji_reply_allowed(self, ck, conf):
+        """频率闸：每会话每小时上限 + 同会话最小间隔。选中即占位。"""
+        if not hasattr(self, 'kaomoji_last'):
+            self.kaomoji_last = {}
+        if not hasattr(self, 'kaomoji_sent'):
+            self.kaomoji_sent = {}
+        now = time.time()
+        cooldown = float(conf.get('cooldown_s', 10) or 0)
+        last = self.kaomoji_last.get(ck, 0.0)
+        if cooldown and now - last < cooldown:
+            return False
+        stamps = [t for t in self.kaomoji_sent.get(ck, []) if now - t < 3600]
+        if len(stamps) >= max(1, int(conf.get('max_per_hour', 30) or 1)):
+            self.kaomoji_sent[ck] = stamps
+            return False
+        stamps.append(now)
+        self.kaomoji_sent[ck] = stamps
+        self.kaomoji_last[ck] = now
+        return True
 
     def should_attach_image(self, ck, conf, fresh):
         """这条回复要不要补图：明确要图词必发；否则按 every_n 抽样（0=关）。"""
@@ -1144,19 +1244,42 @@ class Resident:
                     self.status('reply_rate_limited', chat=ck,
                                 sent_last_hour=sent_last_hour, cap=cap)
                     return True
-            ctx = self.memory.context_for(ck)
-            sources = gather_sources(fresh, cfg)
-            question = ' '.join(str(m.get('text', '')) for m in fresh)
-            self.spend(model, cfg, priority, 'reply')
-            # 热榜照旧：本地缓存、免费，只在正则命中时塞进上下文。
-            hot = self.feed.relevant(question) if task.get('want_search') else []
-            # 联网搜索改成**模型自己调工具**：这里只交一个执行器进去，
-            # 查不查、查什么词由模型决定（一次回复最多查一次，见 search_tool）。
-            # 注意：搜索现在发生在 model.reply() 内部，也就是落在"生成期间画面变了没"
-            # 的比对窗口里——比原来多 1~3 秒。被判定 CHANGED 时会重排一次，
-            # 重排走缓存（cache_ttl 600s）不再花钱，所以代价是延迟不是丢失。
-            search_calls = []
-            search_fn = self.search_tool(cfg, search_calls)
+            # 颜文字快捷回复（2026-10-19 用户要求「发送颜文字」）：消息带约定关键词时
+            # 直接从内置池随机回一条——不调模型、不花额度、零延迟。频率超限或没过
+            # 输出闸就降级回正常模型回复，不会不说话、不会丢消息。
+            kaomoji_conf = self.kaomoji_reply_conf(cfg)
+            kaomoji_text = None
+            if kaomoji_conf.get('enabled') and self.wants_kaomoji(fresh, kaomoji_conf):
+                candidate = random.choice(KAOMOJI_POOL)
+                try:
+                    candidate = check_output(candidate, cfg['reply_max_chars'])
+                except OutputSafetyError:
+                    candidate = None
+                if candidate and self.kaomoji_reply_allowed(ck, kaomoji_conf):
+                    kaomoji_text = candidate
+                    logging.info('kaomoji_reply_hit chat=%s text=%s', ck, kaomoji_text)
+                    self.status('kaomoji_reply_hit', chat=ck, text=kaomoji_text)
+                else:
+                    logging.info('kaomoji_reply_rate_limited chat=%s', ck)
+                    self.status('kaomoji_reply_rate_limited', chat=ck)
+            if kaomoji_text is None:
+                ctx = self.memory.context_for(ck)
+                sources = gather_sources(fresh, cfg)
+                question = ' '.join(str(m.get('text', '')) for m in fresh)
+                self.spend(model, cfg, priority, 'reply')
+                # 热榜照旧：本地缓存、免费，只在正则命中时塞进上下文。
+                hot = self.feed.relevant(question) if task.get('want_search') else []
+                # 联网搜索改成**模型自己调工具**：这里只交一个执行器进去，
+                # 查不查、查什么词由模型决定（一次回复最多查一次，见 search_tool）。
+                # 注意：搜索现在发生在 model.reply() 内部，也就是落在"生成期间画面变了没"
+                # 的比对窗口里——比原来多 1~3 秒。被判定 CHANGED 时会重排一次，
+                # 重排走缓存（cache_ttl 600s）不再花钱，所以代价是延迟不是丢失。
+                search_calls = []
+                search_fn = self.search_tool(cfg, search_calls)
+            else:
+                # 颜文字分支：不查热榜、不联网、不碰模型；给后面的 status 留空壳
+                ctx, sources, hot = {}, [], []
+                search_calls, search_fn = [], None
             t_switch = time.time() - t_switch
             # 生成前先拍一帧，拿它和生成后的帧比较。不能用"上次观察"的旧帧：
             # 会话平静时 observe_one 会提前返回、不更新 last_frame，旧帧一对比
@@ -1166,14 +1289,17 @@ class Resident:
             except SafetyError:
                 frame_before = None
             t_model = time.time()
-            # 会话标识按会话隔离且不含群名（供应商要求稳定会话；我们只发哈希）
-            try:
-                model.session_for(ck)
-            except Exception:                              # noqa: BLE001
-                pass
-            reply = check_output(model.reply(fresh, ctx.get('recent_turns', []), sources,
-                                             chat_context=ctx, hot_items=hot,
-                                             search_fn=search_fn), cfg['reply_max_chars'])
+            if kaomoji_text is None:
+                # 会话标识按会话隔离且不含群名（供应商要求稳定会话；我们只发哈希）
+                try:
+                    model.session_for(ck)
+                except Exception:                          # noqa: BLE001
+                    pass
+                reply = check_output(model.reply(fresh, ctx.get('recent_turns', []), sources,
+                                                 chat_context=ctx, hot_items=hot,
+                                                 search_fn=search_fn), cfg['reply_max_chars'])
+            else:
+                reply = kaomoji_text
             t_model = time.time() - t_model
             # 生成期间用户切走/来新消息/手工发了 → 放弃本次，重新观察
             self.latest_send_config(ck)

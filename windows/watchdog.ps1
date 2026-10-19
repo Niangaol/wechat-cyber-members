@@ -4,10 +4,15 @@
 #   3) 把一行健康 JSON 写进 logs/watchdog.log，方便回看
 #   4) 需要人才能解决的事（掉登录 / 服务起不来 / 心跳卡住）弹 Windows 通知，
 #      同类问题 30 分钟只提醒一次，免得刷屏
+#   5) WSL 里有下班标记（手动停 / 排班停）就整体待机：不拉服务、不告警、不重启
 # 注册：powershell -NoProfile -ExecutionPolicy Bypass -File windows\register-watchdog-task.ps1
 # 自测：powershell -NoProfile -ExecutionPolicy Bypass -File windows\watchdog.ps1 -TestToast
 param([switch]$TestToast)
 $ErrorActionPreference = 'Continue'
+# wsl.exe 的 stdout 是 UTF-8，PowerShell 5.1 默认按系统代码页（简中=GBK）解码，
+# 于是 health.py 里的中文（下班标记的说明）写进日志全是乱码。显式指定 UTF8。
+# 不加这行的话，2026-10-19 之前 logs/watchdog.log 里的中文一直是乱的。
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 $Distro = 'Ubuntu-24.04'
 $User   = 'niangao'
 $Root   = 'D:\AgentPrograms\wechat-bot'
@@ -100,14 +105,22 @@ try {
         Write-Log ('keepalive duplicated (inside=' + $n + ') -> trimmed')
     }
 
-    # 2) systemd 用户服务
-    $state = (& $Wsl -d $Distro -u $User -e bash -lc 'systemctl --user is-active --quiet wechat-stack wechat-bot && echo ACTIVE' 2>&1) -join ' '
-    if ($state -notmatch 'ACTIVE') {
-        Write-Log ('services down (' + $state.Trim() + ') -> starting')
-        & $Wsl -d $Distro -u $User -e bash -lc 'systemctl --user start wechat-stack wechat-bot' 2>&1 | Out-Null
-        Start-Sleep -Seconds 8
-        $again = (& $Wsl -d $Distro -u $User -e bash -lc 'systemctl --user is-active --quiet wechat-stack wechat-bot && echo ACTIVE' 2>&1) -join ' '
-        Write-Log ('after start: ' + $again.Trim())
+    # 2) systemd 用户服务——但"该不该跑"由 WSL 里的下班标记说了算。
+    #    手动停止（botctl.sh stop）和排班停止（bot-schedule.sh stop）都写那个标记。
+    #    不看它的话，这里每 2 分钟就把用户刚停掉的机器人拉起来，一键停止等于没停。
+    $offlineCmd = 'test -f ~/.local/state/wechat-bot/scheduled-offline.json && echo OFFLINE'
+    $off = ((& $Wsl -d $Distro -u $User -e bash -lc $offlineCmd 2>&1) -join ' ') -match 'OFFLINE'
+    if ($off) {
+        Write-Log 'offline marker present -> skip autostart (manual or scheduled stop)'
+    } else {
+        $state = (& $Wsl -d $Distro -u $User -e bash -lc 'systemctl --user is-active --quiet wechat-stack wechat-bot && echo ACTIVE' 2>&1) -join ' '
+        if ($state -notmatch 'ACTIVE') {
+            Write-Log ('services down (' + $state.Trim() + ') -> starting')
+            & $Wsl -d $Distro -u $User -e bash -lc 'systemctl --user start wechat-stack wechat-bot' 2>&1 | Out-Null
+            Start-Sleep -Seconds 8
+            $again = (& $Wsl -d $Distro -u $User -e bash -lc 'systemctl --user is-active --quiet wechat-stack wechat-bot && echo ACTIVE' 2>&1) -join ' '
+            Write-Log ('after start: ' + $again.Trim())
+        }
     }
 
     # 3) 健康摘要 + 需要人介入时弹通知
@@ -120,7 +133,11 @@ try {
         $bot = [string]$h.'wechat-bot'
         $hb = 0.0
         try { $hb = [double]$h.heartbeat_age_s } catch { $hb = 0.0 }
-        if ($wx -like 'logged-out*') {
+        if ($off) {
+            # 主动停掉的：下面这些告警全是"该跑却没跑"，此时一条都不该响，
+            # 更不能因为心跳停了就自动重启（那正是用户不想要的）
+            Reset-HeartbeatStreak
+        } elseif ($wx -like 'logged-out*') {
             Alert-Once 'logged_out' '微信掉登录了，年糕.Agent 已暂停' '需要你重新扫码：http://127.0.0.1:6080/vnc.html'
         } elseif ($bot -ne 'active') {
             Alert-Once 'bot_down' '年糕.Agent 服务没起来' ('wechat-bot=' + $bot)

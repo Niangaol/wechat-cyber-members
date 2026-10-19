@@ -80,6 +80,45 @@ def row_changed(prev, sig, tolerance=0.02):
     return diff > max(8, int(len(sig) * tolerance))
 
 
+# 未读角标检测的默认参数（config/resident.json 的 observe_unread_badge 可覆盖）
+UNREAD_DEFAULTS = {'enabled': True, 'x1': 180, 'x2': 330, 'min_px': 40}
+
+
+def row_unread_px(image, top, bot, x1=180, x2=330):
+    """数这一行列表右端有多少个"未读角标红"像素。0 = 没有未读。
+
+    为什么不扫整行：2026-10-19 实测，整列红像素 179 个全落在 x 80–120 的
+    头像照片里（群头像是 9 张成员照拼的，难免有红色衣服/道具），而列表
+    右端 x>=180 一个都没有。所以只扫列表列右端，头像的红色照片天然被排除，
+    不用给每个群配阈值。
+    阈值 min_px 由调用方判：角标是直径约 20px 的实心红圆（面积 300+），
+    预览图里的红色元素要么在左半边、要么跨不过 40 这个门。
+    """
+    import numpy as np
+    a = np.asarray(image.convert('RGB'), dtype='int16')
+    y1, y2 = max(0, top - 6), min(image.height, bot + 7)
+    if y2 <= y1 or x2 <= x1:
+        return 0
+    blk = a[y1:y2, x1:x2]
+    if blk.size == 0:
+        return 0
+    R, G, B = blk[:, :, 0], blk[:, :, 1], blk[:, :, 2]
+    red = (R > 140) & (R - G > 55) & (R - B > 55)
+    return int(red.sum())
+
+
+def row_unread(image, top, bot, cfg=None):
+    """这一行有没有未读角标。返回 (有没有, 红像素数)。"""
+    conf = dict(UNREAD_DEFAULTS)
+    if isinstance(cfg, dict):
+        conf.update(cfg.get('observe_unread_badge') or {})
+    if not conf.get('enabled', True):
+        return False, 0
+    px = row_unread_px(image, top, bot, int(conf.get('x1', 180)),
+                       int(conf.get('x2', 330)))
+    return px >= int(conf.get('min_px', 40)), px
+
+
 def ocr_tsv(ui, image):
     """带 bounding box 的 OCR（tesseract TSV 模式）。返回 [(text, x, y, w, h), ...]"""
     image = image.convert('RGB').resize((image.width*3, image.height*3))
